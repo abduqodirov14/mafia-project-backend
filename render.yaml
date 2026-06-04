@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: mafia-bot
+    env: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: WEBAPP_URL
+        value: https://maifa-frontend.netlify.app/
+      - key: SERVER_PORT
+        value: 8080

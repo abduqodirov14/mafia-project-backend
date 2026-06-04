@@ -39,36 +39,66 @@ WEBAPP_URL=https://xxxx.ngrok-free.app/webapp
 
 ---
 
-## 🚀 Railway.app Deploy (DOIMIY, BEPUL)
+## 🚀 Deploy (Backend: Railway, Frontend: Vercel)
 
 ### 1. GitHub ga yuklash
 ```bash
 git init
 git add .
-git commit -m "Mafia bot"
+git commit -m "Mafia bot ready"
 git remote add origin https://github.com/SIZNING/mafia-bot.git
 git push -u origin main
 ```
 
-### 2. Railway sozlash
-1. **https://railway.app** ga kiring → GitHub bilan login
+### 2. Backend - Railway.app
+1. **https://railway.app** → GitHub login
 2. **New Project** → **Deploy from GitHub repo** → reponi tanlang
 3. **Add Service** → **Database** → **PostgreSQL** qo'shing
-4. Bot servisiga click → **Variables** tab:
+4. Bot servisiga **Variables** qo'shing:
 
 ```
-BOT_TOKEN        = BotFather dan tokeningiz
-DATABASE_URL     = ${{Postgres.DATABASE_URL}}  ← Railway avtomatik beradi
-WEBAPP_URL       = https://SIZNING-APP.up.railway.app/webapp
-SERVER_PORT      = ${{PORT}}  ← Railway avtomatik beradi
+BOT_TOKEN        = BotFather tokeningiz
+DATABASE_URL     = ${{Postgres.DATABASE_URL}}  ← Railway avtomatik
+WEBAPP_URL       = https://sizning-webapp.vercel.app/
+SERVER_PORT      = 8080
 ```
 
-5. **Deploy** tugmasini bosing → 2-3 daqiqa kutish
+5. **Settings** → **Networking** → **Generate Domain**
+6. Railway URL'ni ko'chirib oling: `https://sizning-backend.up.railway.app`
 
-### 3. BotFather sozlash
+### 3. Frontend - Vercel.com
+1. **https://vercel.com** → GitHub login
+2. **New Project** → **Import** → `webapp` papkasini tanlang
+3. **Root Directory**: `webapp` (muhim!)
+4. **Deploy** bosing
+5. Deploy bo'lgach, Vercel URL'ni oling: `https://sizning-webapp.vercel.app`
+
+### 4. env.js ni yangilash
+`webapp/env.js` faylida:
+```js
+window.API_BASE = 'https://sizning-backend.up.railway.app';
+window.APP_URL  = 'https://sizning-webapp.vercel.app';
+```
+
+Yangilash:
+```bash
+cd webapp
+git add env.js
+git commit -m "Update URLs"
+git push
+# Vercel avtomatik qayta deploy qiladi
+```
+
+### 5. Railway WEBAPP_URL yangilash
+Railway'da Variables → WEBAPP_URL:
+```
+WEBAPP_URL=https://sizning-webapp.vercel.app/
+```
+
+### 6. BotFather sozlash
 ```
 /setmenubutton → botingizni tanlang
-→ WebApp URL: https://SIZNING-APP.up.railway.app/webapp
+→ WebApp URL: https://sizning-webapp.vercel.app/
 → Button text: 🎮 O'ynash
 ```
 
