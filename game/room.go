@@ -11,79 +11,73 @@ type RoomStatus string
 
 const (
 	RoomWaiting  RoomStatus = "waiting"
+	RoomJoining  RoomStatus = "joining"
 	RoomPlaying  RoomStatus = "playing"
 	RoomFinished RoomStatus = "finished"
 )
 
-type Player struct {
-	TelegramID int64
-	Username   string
-	FirstName  string
-	Role       string
-	IsAlive    bool
-	IsMuted    bool
-	JoinOrder  int
-}
-
 type Room struct {
-	ID        string
-	ChatID    int64
-	OwnerID   int64
-	Players   map[int64]*Player
-	Status    RoomStatus
-	MaxPlayer int
-	CreatedAt time.Time
-	mu        sync.RWMutex
+	ID         string
+	ChatID     int64
+	OwnerID    int64
+	Players    map[int64]*Player
+	MaxPlayers int
+	Status     RoomStatus
+	CreatedAt  time.Time
+	mu         sync.RWMutex
 }
 
 func NewRoom(chatID, ownerID int64, ownerName string) *Room {
-	roomID := generateRoomID()
-	room := &Room{
-		ID:        roomID,
-		ChatID:    chatID,
-		OwnerID:   ownerID,
-		Players:   make(map[int64]*Player),
-		Status:    RoomWaiting,
-		MaxPlayer: 12,
-		CreatedAt: time.Now(),
+	roomID := generateID()
+	r := &Room{
+		ID:         roomID,
+		ChatID:     chatID,
+		OwnerID:    ownerID,
+		Players:    make(map[int64]*Player),
+		MaxPlayers: 15,
+		Status:     RoomWaiting,
+		CreatedAt:  time.Now(),
 	}
-	room.Players[ownerID] = &Player{
+	r.Players[ownerID] = &Player{
 		TelegramID: ownerID,
 		Username:   ownerName,
 		IsAlive:    true,
+		JoinOrder:  1,
 	}
-	return room
+	return r
 }
 
 func (r *Room) AddPlayer(p *Player) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	if r.Status != RoomWaiting {
-		return fmt.Errorf("o'yin boshlangan")
+	if r.Status != RoomWaiting && r.Status != RoomJoining {
+		return fmt.Errorf("o'yin allaqachon boshlangan")
 	}
-	if len(r.Players) >= r.MaxPlayer {
-		return fmt.Errorf("xona to'lgan")
+	if len(r.Players) >= r.MaxPlayers {
+		return fmt.Errorf("xona to'lgan (%d/%d)", len(r.Players), r.MaxPlayers)
 	}
 	if _, exists := r.Players[p.TelegramID]; exists {
-		return fmt.Errorf("allaqachon xonаdasiz")
+		return fmt.Errorf("siz allaqachon xonаdasiz")
 	}
-
 	p.JoinOrder = len(r.Players) + 1
 	r.Players[p.TelegramID] = p
 	return nil
 }
 
-func (r *Room) RemovePlayer(telegramID int64) {
+func (r *Room) RemovePlayer(userID int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.Players, telegramID)
+	delete(r.Players, userID)
 }
 
-func (r *Room) PlayerCount() int {
+func (r *Room) GetPlayerList() []*Player {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return len(r.Players)
+	list := make([]*Player, 0, len(r.Players))
+	for _, p := range r.Players {
+		list = append(list, p)
+	}
+	return list
 }
 
 func (r *Room) AlivePlayers() []*Player {
@@ -98,25 +92,25 @@ func (r *Room) AlivePlayers() []*Player {
 	return alive
 }
 
-func (r *Room) GetPlayerList() []*Player {
+func (r *Room) PlayerCount() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	var list []*Player
-	for _, p := range r.Players {
-		list = append(list, p)
-	}
-	// Sort by join order
-	for i := 0; i < len(list)-1; i++ {
-		for j := i + 1; j < len(list); j++ {
-			if list[i].JoinOrder > list[j].JoinOrder {
-				list[i], list[j] = list[j], list[i]
-			}
-		}
-	}
-	return list
+	return len(r.Players)
 }
 
-func generateRoomID() string {
+func (r *Room) AliveCount() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	count := 0
+	for _, p := range r.Players {
+		if p.IsAlive {
+			count++
+		}
+	}
+	return count
+}
+
+func generateID() string {
 	rand.Seed(time.Now().UnixNano())
-	return fmt.Sprintf("%06d", rand.Intn(999999))
+	return fmt.Sprintf("%06d", rand.Intn(900000)+100000)
 }

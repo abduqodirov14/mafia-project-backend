@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 
 	"mafia-bot/bot/handlers"
 	"mafia-bot/config"
@@ -22,29 +24,24 @@ func main() {
 		log.Fatal("BOT_TOKEN topilmadi!")
 	}
 
+	// DB
 	database := db.ConnectPostgres(cfg.DatabaseURL)
 	userRepo := repositories.NewUserRepository(database)
 
+	// Bot
 	bot, err := tgbotapi.NewBotAPI(cfg.BotToken)
 	if err != nil {
 		log.Fatalf("Bot xato: %v", err)
 	}
 	bot.Debug = false
-	log.Printf("✅ Bot: @%s", bot.Self.UserName)
+	botInfo, _ := bot.GetMe()
+	log.Printf("✅ Bot: @%s", botInfo.UserName)
 
+	// Hub + Manager
 	hub := game.NewHub()
 	go hub.Run()
-	manager := game.NewManager(bot, hub)
 
-	// Hub callbacklarni ulash
-	hub.OnConnect      = manager.HandleWebConnect
-	hub.OnStartGame    = manager.StartGameByOwner
-	hub.OnNightAction  = manager.HandleNightAction
-	hub.OnDayVote      = manager.HandleDayVote
-	hub.OnConfirmVote  = func(r string, u int64, c bool) { manager.HandleConfirmVote(r, u, c) }
-
-	botInfo, _ := bot.GetMe()
-	botUsername := botInfo.UserName
+	manager := game.NewManager(bot, hub, cfg.AdminChatID, cfg.WebAppURL, botInfo.UserName)
 
 	// ─── HTTP Server ───
 	mux := http.NewServeMux()
@@ -64,8 +61,8 @@ func main() {
 		room := manager.CreateRoomWeb(userID, name)
 		jok(w, map[string]interface{}{
 			"room_id":      room.ID,
-			"bot_username": botUsername,
-			"invite_link":  fmt.Sprintf("https://t.me/%s?start=ref_%s", botUsername, room.ID),
+			"bot_username": botInfo.UserName,
+			"invite_link":  fmt.Sprintf("https://t.me/%s?start=ref_%s", botInfo.UserName, room.ID),
 		})
 	})
 
@@ -101,7 +98,7 @@ func main() {
 		jok(w, map[string]interface{}{
 			"room_id": room.ID, "owner_id": room.OwnerID,
 			"players": players, "count": room.PlayerCount(),
-			"status": string(room.Status),
+			"max": room.MaxPlayers, "status": string(room.Status),
 		})
 	})
 
@@ -115,44 +112,94 @@ func main() {
 	}()
 
 	// ─── Handlers ───
-	startHandler   := handlers.NewStartHandler(bot, userRepo, manager)
-	roomHandler    := handlers.NewRoomHandler(bot, manager, userRepo, cfg.WebAppURL)
-	shopHandler    := handlers.NewShopHandler(bot, userRepo, database)
-	gameHandler    := handlers.NewGameHandler(bot, manager)
+	startHandler   := handlers.NewStartHandler(bot, userRepo, manager, cfg.WebAppURL, botInfo.UserName)
+	groupHandler   := handlers.NewGroupHandler(bot, manager, userRepo, cfg.WebAppURL)
+	economyHandler := handlers.NewEconomyHandler(bot, userRepo)
+	adminHandler   := handlers.NewAdminHandler(bot, userRepo)
 	payHandler     := handlers.NewPaymentHandler(bot, userRepo)
 
-	// ─── Bot updates ───
+	// ─── Updates ───
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 	updates := bot.GetUpdatesChan(u)
-	log.Println("🎮 Mafia bot tayyor! /testgame bilan sinab ko'ring")
+	log.Println("🎮 Mafia bot tayyor! Guruhga qo'shing va /start yuboring")
 
 	for update := range updates {
 		go func(upd tgbotapi.Update) {
-			// Pre-checkout va payment
-			if upd.PreCheckoutQuery != nil { payHandler.Handle(upd); return }
-			if upd.Message != nil && upd.Message.SuccessfulPayment != nil { payHandler.Handle(upd); return }
-
-			// Callback queries
-			if upd.CallbackQuery != nil {
-				if payHandler.HandleCallback(upd.CallbackQuery) { return }
-				gameHandler.HandleCallback(upd)
-				shopHandler.Handle(upd)
+			// Pre-checkout
+			if upd.PreCheckoutQuery != nil {
+				payHandler.Handle(upd)
+				return
+			}
+			// To'lov
+			if upd.Message != nil && upd.Message.SuccessfulPayment != nil {
+				payHandler.Handle(upd)
 				return
 			}
 
-			// Commands
-			if upd.Message != nil && upd.Message.IsCommand() {
-				switch upd.Message.Command() {
-				case "start", "profile", "rating", "testgame":
-					startHandler.Handle(upd)
-				case "newroom", "join", "startgame", "leave":
-					roomHandler.Handle(upd)
-				case "shop", "inventory":
-					shopHandler.Handle(upd)
-				case "buy", "shop_stars", "donate":
-					payHandler.Handle(upd)
+			// Callback queries
+			if upd.CallbackQuery != nil {
+				data := upd.CallbackQuery.Data
+
+				// Admin callbacks
+				if adminHandler.HandleCallback(upd.CallbackQuery) { return }
+				// Start callbacks
+				if startHandler.HandleCallback(upd.CallbackQuery) { return }
+				// Pay callbacks
+				if payHandler.HandleCallback(upd.CallbackQuery) { return }
+				// Group callbacks (join, leave, vote, night actions)
+				if groupHandler.HandleCallback(upd.CallbackQuery) { return }
+
+				// Shop callbacks
+				if data == "shop_main" {
+					payHandler.Handle(tgbotapi.Update{
+						Message: &tgbotapi.Message{
+							Chat: upd.CallbackQuery.Message.Chat,
+							From: upd.CallbackQuery.From,
+							Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Length: 8}},
+							Text: "/buy",
+						},
+					})
 				}
+				return
+			}
+
+			if upd.Message == nil {
+				return
+			}
+			msg := upd.Message
+			isGroup := msg.Chat.IsGroup() || msg.Chat.IsSuperGroup()
+
+			// Guruh xabarlari
+			if isGroup {
+				if msg.IsCommand() {
+					groupHandler.Handle(upd)
+				}
+				return
+			}
+
+			// Shaxsiy xabarlar
+			if msg.IsCommand() {
+				cmd := msg.Command()
+				switch {
+				case adminHandler.IsAdmin(msg.From.ID) &&
+					(cmd == "admin" || cmd == "stats" || cmd == "addcoins" || cmd == "ban" || cmd == "broadcast"):
+					adminHandler.Handle(upd)
+
+				case cmd == "money" || cmd == "give" || cmd == "balance" || cmd == "bal":
+					economyHandler.Handle(upd)
+
+				case cmd == "buy" || cmd == "shop_stars" || cmd == "donate" || cmd == "support":
+					payHandler.Handle(upd)
+
+				default:
+					startHandler.Handle(upd)
+				}
+			}
+
+			// /+ va /- shaxsiy chatda
+			if msg.Text == "/+" || strings.HasPrefix(msg.Text, "/join") {
+				groupHandler.Handle(upd)
 			}
 		}(update)
 	}
@@ -160,13 +207,16 @@ func main() {
 
 func cors(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, ngrok-skip-browser-warning")
 	w.Header().Set("Content-Type", "application/json")
 }
+
 func jok(w http.ResponseWriter, data map[string]interface{}) {
 	data["ok"] = true
 	json.NewEncoder(w).Encode(data)
 }
+
 func jerr(w http.ResponseWriter, msg string) {
 	w.WriteHeader(http.StatusBadRequest)
 	json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": msg})

@@ -17,18 +17,16 @@ var upgrader = websocket.Upgrader{
 }
 
 const (
-	MsgTypeGameState   = "game_state"
-	MsgTypeChat        = "chat"
-	MsgTypeVoiceSignal = "voice_signal"
+	MsgTypeRoomInfo    = "room_info"
 	MsgTypeRoleReveal  = "role_reveal"
+	MsgTypeGameState   = "game_state"
 	MsgTypePhaseChange = "phase_change"
 	MsgTypePlayerDied  = "player_died"
 	MsgTypeGameEnd     = "game_end"
-	MsgTypeRoomInfo    = "room_info"
-	MsgTypeConfirmVote = "confirm_vote"
-	MsgTypeActionResult = "action_result"
-	MsgTypeError       = "error"
-	MsgTypeJoinSuccess = "join_success"
+	MsgTypeChat        = "chat"
+	MsgTypeVoiceSignal = "voice_signal"
+	MsgTypeNightResult = "night_result"
+	MsgTypeSheriffResult = "sheriff_result"
 )
 
 type WSMessage struct {
@@ -43,14 +41,7 @@ type PlayerInfo struct {
 	Name     string `json:"name"`
 	IsAlive  bool   `json:"is_alive"`
 	Role     string `json:"role,omitempty"`
-	JoinOrder int   `json:"join_order,omitempty"`
-}
-
-type GameStatePayload struct {
-	Phase   string       `json:"phase"`
-	Round   int          `json:"round"`
-	Players []PlayerInfo `json:"players"`
-	Timer   int          `json:"timer"`
+	Emoji    string `json:"emoji,omitempty"`
 }
 
 type RoleRevealPayload struct {
@@ -59,30 +50,18 @@ type RoleRevealPayload struct {
 	Emoji       string `json:"emoji"`
 }
 
+type GameStatePayload struct {
+	Phase   string       `json:"phase"`
+	Round   int          `json:"round"`
+	Players []PlayerInfo `json:"players"`
+	Timer   int          `json:"timer,omitempty"`
+}
+
 type PhasePayload struct {
-	Phase    string `json:"phase"`
-	Round    int    `json:"round"`
-	Message  string `json:"message"`
-	Timer    int    `json:"timer"`
-}
-
-type ChatPayload struct {
-	UserID   int64  `json:"user_id"`
-	Username string `json:"username"`
-	Text     string `json:"text"`
-}
-
-type NightActionPayload struct {
-	Role     string `json:"role"`
-	TargetID int64  `json:"target_id"`
-}
-
-type VotePayload struct {
-	TargetID int64 `json:"target_id"`
-}
-
-type ConfirmVotePayload struct {
-	Confirm bool `json:"confirm"`
+	Phase   string `json:"phase"`
+	Round   int    `json:"round"`
+	Message string `json:"message"`
+	Timer   int    `json:"timer"`
 }
 
 type Client struct {
@@ -111,11 +90,12 @@ type Hub struct {
 	broadcast  chan *BroadcastMsg
 	direct     chan *DirectMsg
 	mu         sync.RWMutex
-	OnConnect  func(roomID string, userID int64)
-	OnStartGame func(roomID string, userID int64) error
-	OnNightAction func(roomID string, role string, userID, targetID int64)
-	OnDayVote func(roomID string, userID, targetID int64)
-	OnConfirmVote func(roomID string, userID int64, confirm bool)
+
+	OnConnect    func(roomID string, userID int64)
+	OnStartGame  func(roomID string, ownerID int64) error
+	OnNightAction func(roomID, role string, voterID, targetID int64)
+	OnDayVote    func(roomID string, voterID, targetID int64)
+	OnChat       func(roomID string, userID int64, username, text string)
 }
 
 func NewHub() *Hub {
@@ -138,8 +118,7 @@ func (h *Hub) Run() {
 			}
 			h.rooms[client.roomID][client] = true
 			h.mu.Unlock()
-			log.Printf("✅ WebApp: user %d joined room %s", client.userID, client.roomID)
-
+			log.Printf("✅ WS: user %d → room %s", client.userID, client.roomID)
 			if h.OnConnect != nil {
 				go h.OnConnect(client.roomID, client.userID)
 			}
@@ -184,22 +163,18 @@ func (h *Hub) Run() {
 	}
 }
 
-func (h *Hub) BroadcastToRoom(roomID string, msgType string, payload interface{}) {
+func (h *Hub) BroadcastToRoom(roomID, msgType string, payload interface{}) {
 	data, _ := json.Marshal(payload)
 	msg := WSMessage{Type: msgType, RoomID: roomID, Payload: data}
-	msgBytes, _ := json.Marshal(msg)
-	h.broadcast <- &BroadcastMsg{roomID: roomID, message: msgBytes}
+	bytes, _ := json.Marshal(msg)
+	h.broadcast <- &BroadcastMsg{roomID: roomID, message: bytes}
 }
 
 func (h *Hub) SendToUser(userID int64, msgType string, payload interface{}) {
 	data, _ := json.Marshal(payload)
 	msg := WSMessage{Type: msgType, UserID: userID, Payload: data}
-	msgBytes, _ := json.Marshal(msg)
-	h.direct <- &DirectMsg{userID: userID, message: msgBytes}
-}
-
-func (h *Hub) SendError(userID int64, text string) {
-	h.SendToUser(userID, MsgTypeError, map[string]string{"message": text})
+	bytes, _ := json.Marshal(msg)
+	h.direct <- &DirectMsg{userID: userID, message: bytes}
 }
 
 func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -216,7 +191,7 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("WebSocket upgrade error: %v", err)
+		log.Printf("WS upgrade error: %v", err)
 		return
 	}
 	client := &Client{conn: conn, send: make(chan []byte, 256), hub: h, roomID: roomID, userID: userID}
@@ -239,43 +214,34 @@ func (c *Client) readPump() {
 		if err := json.Unmarshal(message, &msg); err != nil {
 			continue
 		}
+		var payload map[string]interface{}
+		if msg.Payload != nil {
+			json.Unmarshal(msg.Payload, &payload)
+		}
+
 		switch msg.Type {
 		case MsgTypeVoiceSignal, MsgTypeChat:
 			c.hub.broadcast <- &BroadcastMsg{roomID: c.roomID, message: message, exclude: c.userID}
+
 		case "start_game":
 			if c.hub.OnStartGame != nil {
-				if err := c.hub.OnStartGame(c.roomID, c.userID); err != nil {
-					c.hub.SendError(c.userID, err.Error())
-				}
+				go c.hub.OnStartGame(c.roomID, c.userID)
 			}
+
 		case "night_action":
-			var payload NightActionPayload
-			if decodePayload(msg.Payload, &payload) == nil && c.hub.OnNightAction != nil {
-				c.hub.OnNightAction(c.roomID, payload.Role, c.userID, payload.TargetID)
+			if c.hub.OnNightAction != nil && payload != nil {
+				role, _ := payload["role"].(string)
+				targetIDFloat, _ := payload["target_id"].(float64)
+				go c.hub.OnNightAction(c.roomID, role, c.userID, int64(targetIDFloat))
 			}
+
 		case "day_vote":
-			var payload VotePayload
-			if decodePayload(msg.Payload, &payload) == nil && c.hub.OnDayVote != nil {
-				c.hub.OnDayVote(c.roomID, c.userID, payload.TargetID)
-			}
-		case "confirm_vote":
-			var payload ConfirmVotePayload
-			if decodePayload(msg.Payload, &payload) == nil && c.hub.OnConfirmVote != nil {
-				c.hub.OnConfirmVote(c.roomID, c.userID, payload.Confirm)
+			if c.hub.OnDayVote != nil && payload != nil {
+				targetIDFloat, _ := payload["target_id"].(float64)
+				go c.hub.OnDayVote(c.roomID, c.userID, int64(targetIDFloat))
 			}
 		}
 	}
-}
-
-func decodePayload(raw json.RawMessage, v interface{}) error {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil
-	}
-	var asString string
-	if err := json.Unmarshal(raw, &asString); err == nil {
-		return json.Unmarshal([]byte(asString), v)
-	}
-	return json.Unmarshal(raw, v)
 }
 
 func (c *Client) writePump() {

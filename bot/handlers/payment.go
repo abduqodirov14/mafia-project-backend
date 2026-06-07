@@ -4,26 +4,24 @@ import (
 	"fmt"
 	"log"
 	"mafia-bot/db/repositories"
-
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-// Mahsulotlar ro'yxati (Telegram Stars bilan)
 type Product struct {
 	ID          string
 	Title       string
 	Description string
 	Emoji       string
-	Stars       int // Telegram Stars narxi
-	CoinsGiven  int
+	Stars       int
+	Coins       int
 }
 
 var Products = []Product{
-	{ID: "coins_500",  Title: "500 Tanga",      Emoji: "💰", Description: "O'yinda teri va buyumlar uchun 500 tanga",    Stars: 15,  CoinsGiven: 500},
-	{ID: "coins_1500", Title: "1500 Tanga",     Emoji: "💎", Description: "O'yinda teri va buyumlar uchun 1500 tanga",   Stars: 40,  CoinsGiven: 1500},
-	{ID: "coins_5000", Title: "5000 Tanga",     Emoji: "👑", Description: "O'yinda teri va buyumlar uchun 5000 tanga",   Stars: 120, CoinsGiven: 5000},
-	{ID: "xp_boost",   Title: "2x XP (7 kun)",  Emoji: "⚡", Description: "1 hafta davomida 2 baravar XP yig'asiz",      Stars: 50,  CoinsGiven: 0},
-	{ID: "vip_badge",  Title: "VIP Nishon",      Emoji: "🏆", Description: "Profilingizda VIP nishon va maxsus ranglar", Stars: 100, CoinsGiven: 200},
+	{"coins_500",  "500 Tanga",     "💰", "O'yinda ishlatish uchun 500 tanga",    15,  500},
+	{"coins_1500", "1500 Tanga",    "💎", "O'yinda ishlatish uchun 1500 tanga",   40,  1500},
+	{"coins_5000", "5000 Tanga",    "👑", "O'yinda ishlatish uchun 5000 tanga",  120, 5000},
+	{"xp_boost",   "2x XP (7 kun)", "⚡", "7 kun davomida 2 baravar XP yig'asiz", 50,  100},
+	{"vip_badge",  "VIP Nishon",    "🏆", "VIP nishon va bonuslar",              100, 200},
 }
 
 type PaymentHandler struct {
@@ -35,19 +33,15 @@ func NewPaymentHandler(bot *tgbotapi.BotAPI, userRepo *repositories.UserReposito
 	return &PaymentHandler{bot: bot, userRepo: userRepo}
 }
 
-// Handle — barcha to'lov hodisalarini boshqaradi
 func (h *PaymentHandler) Handle(update tgbotapi.Update) {
-	// 1. To'lov tasdiqlash (pre_checkout)
 	if update.PreCheckoutQuery != nil {
-		h.handlePreCheckout(update.PreCheckoutQuery)
+		h.bot.Request(tgbotapi.PreCheckoutConfig{PreCheckoutQueryID: update.PreCheckoutQuery.ID, OK: true})
 		return
 	}
-	// 2. Muvaffaqiyatli to'lov
 	if update.Message != nil && update.Message.SuccessfulPayment != nil {
 		h.handleSuccess(update.Message)
 		return
 	}
-	// 3. Buyruqlar
 	if update.Message != nil && update.Message.IsCommand() {
 		switch update.Message.Command() {
 		case "buy", "shop_stars":
@@ -58,132 +52,82 @@ func (h *PaymentHandler) Handle(update tgbotapi.Update) {
 	}
 }
 
-// Do'kon ko'rsatish
 func (h *PaymentHandler) showShop(chatID int64) {
-	text := "🛍 <b>DO'KON — Telegram Stars</b>\n\n" +
-		"Telegram Stars orqali xarid qilishingiz mumkin:\n\n"
-
+	text := "🛍 <b>STARS DO'KONI</b>\n\nTelegram Stars orqali xarid qiling:\n\n"
 	var rows [][]tgbotapi.InlineKeyboardButton
 	for _, p := range Products {
 		text += fmt.Sprintf("%s <b>%s</b> — %d ⭐\n%s\n\n", p.Emoji, p.Title, p.Stars, p.Description)
-		row := tgbotapi.NewInlineKeyboardRow(
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(
 				fmt.Sprintf("%s %s — %d ⭐", p.Emoji, p.Title, p.Stars),
 				"buy_"+p.ID,
 			),
-		)
-		rows = append(rows, row)
+		))
 	}
-
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "HTML"
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
 	h.bot.Send(msg)
 }
 
-// Xarid uchun invoice yuborish
-func (h *PaymentHandler) SendInvoice(chatID int64, productID string) {
-	var product *Product
-	for i := range Products {
-		if Products[i].ID == productID {
-			product = &Products[i]
-			break
-		}
-	}
-	if product == nil {
-		return
-	}
+func (h *PaymentHandler) showDonate(chatID int64) {
+	msg := tgbotapi.NewMessage(chatID,
+		"❤️ <b>BOTNI QO'LLAB-QUVVATLASH</b>\n\nBotni rivojlantirish uchun yordam bering!\nTelegram Stars orqali xarid qiling 🙏")
+	msg.ParseMode = "HTML"
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⭐ 15 Stars", "buy_coins_500"),
+			tgbotapi.NewInlineKeyboardButtonData("⭐ 40 Stars", "buy_coins_1500"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("👑 120 Stars", "buy_coins_5000"),
+		),
+	)
+	h.bot.Send(msg)
+}
 
+func (h *PaymentHandler) SendInvoice(chatID int64, productID string) {
+	var p *Product
+	for i := range Products {
+		if Products[i].ID == productID { p = &Products[i]; break }
+	}
+	if p == nil { return }
 	invoice := tgbotapi.InvoiceConfig{
 		BaseChat:    tgbotapi.BaseChat{ChatID: chatID},
-		Title:       product.Emoji + " " + product.Title,
-		Description: product.Description,
-		Payload:     product.ID,
-		Currency:    "XTR", // Telegram Stars
-		Prices: []tgbotapi.LabeledPrice{
-			{Label: product.Title, Amount: product.Stars},
-		},
+		Title:       p.Emoji + " " + p.Title,
+		Description: p.Description,
+		Payload:     p.ID,
+		Currency:    "XTR",
+		Prices:      []tgbotapi.LabeledPrice{{Label: p.Title, Amount: p.Stars}},
 	}
-
 	if _, err := h.bot.Send(invoice); err != nil {
 		log.Printf("Invoice xato: %v", err)
 	}
 }
 
-// Pre-checkout: doim tasdiqlash
-func (h *PaymentHandler) handlePreCheckout(q *tgbotapi.PreCheckoutQuery) {
-	cfg := tgbotapi.PreCheckoutConfig{
-		PreCheckoutQueryID: q.ID,
-		OK:                 true,
-	}
-	h.bot.Request(cfg)
-}
-
-// Muvaffaqiyatli to'lovni qayta ishlash
 func (h *PaymentHandler) handleSuccess(msg *tgbotapi.Message) {
 	pay := msg.SuccessfulPayment
-	userID := msg.From.ID
-
-	log.Printf("✅ To'lov: user=%d, product=%s, stars=%d", userID, pay.InvoicePayload, pay.TotalAmount)
-
-	user, err := h.userRepo.GetOrCreate(userID, "", "")
-	if err != nil {
-		log.Printf("User topilmadi: %v", err)
-		return
+	user, err := h.userRepo.GetOrCreate(msg.From.ID, msg.From.UserName, msg.From.FirstName)
+	if err != nil { return }
+	var text string
+	for _, p := range Products {
+		if p.ID == pay.InvoicePayload {
+			user.Coins += p.Coins
+			h.userRepo.Update(user)
+			text = fmt.Sprintf("✅ <b>%s %s</b> sotib olindi!\n💰 Hisobingiz: <b>%d tanga</b>",
+				p.Emoji, p.Title, user.Coins)
+			break
+		}
 	}
-
-	var thankMsg string
-
-	switch pay.InvoicePayload {
-	case "coins_500":
-		user.Coins += 500
-		thankMsg = "✅ 500 tanga hisobingizga qo'shildi!"
-	case "coins_1500":
-		user.Coins += 1500
-		thankMsg = "✅ 1500 tanga hisobingizga qo'shildi!"
-	case "coins_5000":
-		user.Coins += 5000
-		thankMsg = "✅ 5000 tanga hisobingizga qo'shildi!"
-	case "xp_boost":
-		thankMsg = "⚡ 2x XP 7 kun davomida faollashtirildi!"
-		// TODO: XP boost logicini qo'shish
-	case "vip_badge":
-		thankMsg = "👑 VIP nishon qo'shildi! /profile ni tekshiring"
-		// TODO: VIP badge logicini qo'shish
-	default:
-		thankMsg = "✅ Xarid muvaffaqiyatli!"
-	}
-
-	h.userRepo.Update(user)
-
-	reply := tgbotapi.NewMessage(msg.Chat.ID, thankMsg)
+	if text == "" { text = "✅ Xarid muvaffaqiyatli!" }
+	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
+	reply.ParseMode = "HTML"
 	h.bot.Send(reply)
 }
 
-// Callback: "buy_coins_500" kabi
 func (h *PaymentHandler) HandleCallback(query *tgbotapi.CallbackQuery) bool {
-	data := query.Data
-	if len(data) < 4 || data[:4] != "buy_" {
-		return false
-	}
-	productID := data[4:]
+	if len(query.Data) < 4 || query.Data[:4] != "buy_" { return false }
 	h.bot.Request(tgbotapi.NewCallback(query.ID, ""))
-	h.SendInvoice(query.Message.Chat.ID, productID)
+	h.SendInvoice(query.Message.Chat.ID, query.Data[4:])
 	return true
-}
-
-func (h *PaymentHandler) showDonate(chatID int64) {
-	msg := tgbotapi.NewMessage(chatID,
-		"❤️ <b>BOTNI QO'LLAB-QUVVATLASH</b>\n\n"+
-			"Agar bot sizga yoqqan bo'lsa, rivojlantirish uchun yordam bering:\n\n"+
-			"⭐ Telegram Stars orqali istalgan miqdor yuborishingiz mumkin\n\n"+
-			"Rahmat! 🙏")
-	msg.ParseMode = "HTML"
-	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⭐ 50 Stars yuborish", "buy_coins_500"),
-			tgbotapi.NewInlineKeyboardButtonData("⭐ 100 Stars yuborish", "buy_coins_1500"),
-		),
-	)
-	h.bot.Send(msg)
 }
