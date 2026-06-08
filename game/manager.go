@@ -183,7 +183,7 @@ func (m *Manager) assignRoles(room *Room, state *GameState) {
 					tgbotapi.NewInlineKeyboardRow(webAppBtn),
 				)
 			}
-			m.bot.Send(msg)
+			go m.bot.Send(msg)
 		}
 
 		// WebApp ga ham yuborish
