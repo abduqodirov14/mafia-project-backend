@@ -3,7 +3,7 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o mafia-bot ./...
+RUN CGO_ENABLED=0 go build -o mafia-bot .
 
 FROM alpine:latest
 RUN apk add --no-cache ca-certificates
