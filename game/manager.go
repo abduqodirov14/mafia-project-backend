@@ -359,7 +359,6 @@ func (m *Manager) processNight(room *Room, state *GameState) {
 
 	// Shifokor saqladi?
 	savedByDoctor := night.DoctorTargetID
-	savedByBodyguard := night.BodyguardTargetID
 
 	// Manyak jabrlanuvchisi
 	if manyakKilledID != 0 && manyakKilledID != savedByDoctor {
@@ -377,7 +376,7 @@ func (m *Manager) processNight(room *Room, state *GameState) {
 	}
 
 	// Mafia jabrlanuvchisi
-	if killedID != 0 && killedID != savedByDoctor && killedID != savedByBodyguard {
+	if killedID != 0 && killedID != savedByDoctor {
 		if p, ok := room.Players[killedID]; ok && p.IsAlive {
 			// Mashuqa bloklagan odamni o'ldirish mumkinmi?
 			killerRole := m.getMafiaRole(room)
@@ -405,7 +404,7 @@ func (m *Manager) processNight(room *Room, state *GameState) {
 				m.handleKomissarDeath(room, state)
 			}
 		}
-	} else if killedID != 0 && (killedID == savedByDoctor || killedID == savedByBodyguard) {
+	} else if killedID != 0 && killedID == savedByDoctor {
 		m.sendToChat(room.ChatID, SavedMessage(m.getPlayerName(room, killedID)))
 	} else {
 		m.sendToChat(room.ChatID, NobodyDiedMsg())
@@ -732,9 +731,6 @@ func (m *Manager) HandleNightAction(roomID, roleName string, voterID, targetID i
 
 	case roles.RoleTentak:
 		night.TentakTargetID = targetID
-
-	case roles.RoleBodyguard:
-		night.BodyguardTargetID = targetID
 	}
 }
 
@@ -1118,8 +1114,8 @@ func isBot(userID int64) bool {
 
 func makeWebAppButton(text, url string) tgbotapi.InlineKeyboardButton {
 	return tgbotapi.InlineKeyboardButton{
-		Text:   text,
-		WebApp: &tgbotapi.WebAppInfo{URL: url},
+		Text: text,
+		URL:  &url,
 	}
 }
 

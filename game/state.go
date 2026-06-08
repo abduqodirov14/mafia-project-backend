@@ -37,7 +37,6 @@ type NightState struct {
 	TentakTargetID    int64
 	ManyakTargetID    int64
 	AdvokatTargetID   int64
-	BodyguardTargetID int64
 	KilledIDs         []int64
 	SavedIDs          []int64
 	BlockedIDs        []int64

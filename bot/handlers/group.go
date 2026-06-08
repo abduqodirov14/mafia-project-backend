@@ -116,9 +116,10 @@ func (h *GroupHandler) buildJoinKeyboard(roomID string) tgbotapi.InlineKeyboardM
 
 	// WebApp tugmasi
 	if h.webAppURL != "" {
+		joinURL := h.webAppURL + "?room=" + roomID
 		webBtn := tgbotapi.InlineKeyboardButton{
-			Text:   "🎮 O'yinga kirish (WebApp)",
-			WebApp: &tgbotapi.WebAppInfo{URL: h.webAppURL + "?room=" + roomID},
+			Text: "🎮 O'yinga kirish (WebApp)",
+			URL:  &joinURL,
 		}
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(webBtn))
 	}
@@ -305,7 +306,7 @@ func (h *GroupHandler) handleNightActionCallback(query *tgbotapi.CallbackQuery, 
 	validRoles := map[string]bool{
 		"Don": true, "Mafiya": true, "Shifokor": true,
 		"Komissar": true, "Serjant": true, "Mashuqa": true,
-		"Daydi": true, "Manyak": true, "Tentak": true, "Bodyguard": true,
+		"Daydi": true, "Manyak": true, "Tentak": true,
 	}
 	if !validRoles[roleName] {
 		return false

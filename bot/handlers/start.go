@@ -85,8 +85,8 @@ func (h *StartHandler) handleStart(msg *tgbotapi.Message) {
 	var rows [][]tgbotapi.InlineKeyboardButton
 	if h.webAppURL != "" {
 		webBtn := tgbotapi.InlineKeyboardButton{
-			Text:   "🎮 O'yinni boshlash (WebApp)",
-			WebApp: &tgbotapi.WebAppInfo{URL: h.webAppURL},
+			Text: "🎮 O'yinni boshlash (WebApp)",
+			URL:  &h.webAppURL,
 		}
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(webBtn))
 	}
@@ -130,9 +130,10 @@ func (h *StartHandler) joinRoomByRef(msg *tgbotapi.Message, roomID string) {
 	outMsg := tgbotapi.NewMessage(msg.Chat.ID, text)
 	outMsg.ParseMode = "HTML"
 	if h.webAppURL != "" {
+		joinURL := h.webAppURL + "?room=" + roomID
 		webBtn := tgbotapi.InlineKeyboardButton{
-			Text:   "🎮 O'yinga kirish (WebApp)",
-			WebApp: &tgbotapi.WebAppInfo{URL: h.webAppURL + "?room=" + roomID},
+			Text: "🎮 O'yinga kirish (WebApp)",
+			URL:  &joinURL,
 		}
 		outMsg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 			tgbotapi.NewInlineKeyboardRow(webBtn),

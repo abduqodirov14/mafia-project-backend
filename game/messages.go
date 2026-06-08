@@ -46,7 +46,7 @@ func DeathMessage(player *Player, killer roles.RoleName) string {
 
 	var deathVerb string
 	switch killer {
-	case roles.RoleMafia, roles.RoleDon, roles.RoleMafia:
+	case roles.RoleMafia, roles.RoleDon:
 		deathVerb = "vaxshiylarcha o'ldirildi"
 	case roles.RoleManyak:
 		deathVerb = "manyak tomonidan o'ldirildi"
