@@ -93,12 +93,13 @@ func (h *PaymentHandler) SendInvoice(chatID int64, productID string) {
 	}
 	if p == nil { return }
 	invoice := tgbotapi.InvoiceConfig{
-		BaseChat:    tgbotapi.BaseChat{ChatID: chatID},
-		Title:       p.Emoji + " " + p.Title,
-		Description: p.Description,
-		Payload:     p.ID,
-		Currency:    "XTR",
-		Prices:      []tgbotapi.LabeledPrice{{Label: p.Title, Amount: p.Stars}},
+		BaseChat:             tgbotapi.BaseChat{ChatID: chatID},
+		Title:                p.Emoji + " " + p.Title,
+		Description:          p.Description,
+		Payload:              p.ID,
+		Currency:             "XTR",
+		Prices:               []tgbotapi.LabeledPrice{{Label: p.Title, Amount: p.Stars}},
+		SuggestedTipAmounts: []int{p.Stars},
 	}
 	if _, err := h.bot.Send(invoice); err != nil {
 		log.Printf("Invoice xato: %v", err)
