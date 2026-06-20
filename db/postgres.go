@@ -10,46 +10,67 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-var DB *gorm.DB
-
 func ConnectPostgres(dsn string) *gorm.DB {
 	var db *gorm.DB
 	var err error
-	
-	// Retry logic - database tayyor bo'lguncha 30 soniya kutadi
+
 	maxRetries := 10
 	for i := 0; i < maxRetries; i++ {
 		db, err = gorm.Open(postgres.New(postgres.Config{
 			DSN:                  dsn,
 			PreferSimpleProtocol: true,
 		}), &gorm.Config{
-			Logger: logger.Default.LogMode(logger.Warn),
+			Logger: logger.Default.LogMode(logger.Silent),
 		})
-		
 		if err == nil {
-			break // Muvaffaqiyatli ulandi
+			break
 		}
-		
-		log.Printf("⏳ PostgreSQL kutilmoqda... (%d/%d): %v", i+1, maxRetries, err)
+		log.Printf("[db] postgres waiting... (%d/%d): %v", i+1, maxRetries, err)
 		if i < maxRetries-1 {
 			time.Sleep(3 * time.Second)
 		}
 	}
-	
 	if err != nil {
-		log.Fatalf("❌ PostgreSQL ulanish xato: %v", err)
+		log.Fatalf("[db] postgres connection failed: %v", err)
 	}
-	if err := db.AutoMigrate(
-		&models.User{}, &models.Game{},
-		&models.GamePlayer{}, &models.Item{}, &models.UserItem{},
-	); err != nil {
-		log.Printf("⚠️ Migration (normal): %v", err)
+
+	runMigrations(db)
+	seedShopItems(db)
+	log.Println("[db] postgres connected")
+	return db
+}
+
+func runMigrations(db *gorm.DB) {
+	tables := []struct {
+		model interface{}
+		name  string
+	}{
+		{&models.User{}, "users"},
+		{&models.Game{}, "games"},
+		{&models.GamePlayer{}, "game_players"},
+		{&models.Item{}, "items"},
+		{&models.UserItem{}, "user_items"},
 	}
-	items := models.DefaultShopItems()
-	for _, item := range items {
+
+	for _, t := range tables {
+		if err := db.AutoMigrate(t.model); err != nil {
+			log.Printf("[db] migration %s: %v", t.name, err)
+		}
+	}
+
+	// Fix missing columns on existing tables
+	raw := db.Exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT DEFAULT ''")
+	if raw.Error != nil {
+		log.Printf("[db] add first_name: %v", raw.Error)
+	}
+	raw = db.Exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS active_skin TEXT DEFAULT 'default'")
+	if raw.Error != nil {
+		log.Printf("[db] add active_skin: %v", raw.Error)
+	}
+}
+
+func seedShopItems(db *gorm.DB) {
+	for _, item := range models.DefaultShopItems() {
 		db.FirstOrCreate(&item, models.Item{ID: item.ID})
 	}
-	log.Println("✅ PostgreSQL ulandi")
-	DB = db
-	return db
 }

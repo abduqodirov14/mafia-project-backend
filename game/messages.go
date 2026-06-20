@@ -8,8 +8,6 @@ import (
 	"mafia-bot/game/roles"
 )
 
-// ─── TUN XABARLARI ───
-
 var nightStartMessages = []string{
 	"🌙 <b>Qorong'i tushdi...</b>\nShahar uyquga ketdi. Ammo kimdir yomonlik rejalar qilmoqda...",
 	"🌙 <b>TUN %d BOSHLANDI</b>\nKo'chalar bo'shab qoldi. Faqat qorong'i va sirlar qoldi...",
@@ -19,32 +17,23 @@ var nightStartMessages = []string{
 var dayStartMessages = []string{
 	"☀️ Quyosh chiqib, tunda to'kilgan qonlarni quritdi...",
 	"☀️ <b>KUN %d BOSHLANDI</b>\nAholi tunda bo'lgan voqealarni muhokama qilmoqda...",
-	"🌅 Yana bir kun boshlanди. Kecha nimalar bo'ldi — hamma bilmoqchi...",
+	"🌅 Yana bir kun boshlandi. Kecha nimalar bo'ldi — hamma bilmoqchi...",
 }
 
 func NightStartMsg(round int) string {
 	msg := nightStartMessages[rand.Intn(len(nightStartMessages))]
-	if strings.Contains(msg, "%d") {
-		return fmt.Sprintf(msg, round)
-	}
-	return msg
+	return fmt.Sprintf(msg, round)
 }
 
 func DayStartMsg(round int) string {
 	msg := dayStartMessages[rand.Intn(len(dayStartMessages))]
-	if strings.Contains(msg, "%d") {
-		return fmt.Sprintf(msg, round)
-	}
-	return msg
+	return fmt.Sprintf(msg, round)
 }
-
-// ─── O'LIM XABARLARI ───
 
 func DeathMessage(player *Player, killer roles.RoleName) string {
 	roleInfo := roles.Get(player.Role)
-	emoji := roleInfo.Emoji
 
-	var deathVerb string
+	deathVerb := "o'ldirildi"
 	switch killer {
 	case roles.RoleMafia, roles.RoleDon:
 		deathVerb = "vaxshiylarcha o'ldirildi"
@@ -52,25 +41,18 @@ func DeathMessage(player *Player, killer roles.RoleName) string {
 		deathVerb = "manyak tomonidan o'ldirildi"
 	case roles.RoleKamikaze:
 		deathVerb = "portlash natijasida halok bo'ldi"
-	default:
-		deathVerb = "o'ldirildi"
 	}
 
-	msg := fmt.Sprintf("🔴 Tunda %s <b>%s</b> %s...", emoji, player.Username, deathVerb)
+	msg := fmt.Sprintf("🔴 Tunda %s <b>%s</b> %s...", roleInfo.Emoji, player.Username, deathVerb)
 
-	if player.LastWords != "" {
-		msg += fmt.Sprintf("\n\n💬 O'limidan oldin kimdir <b>%s</b> qichqirganini eshitdi:\n<i>%s</i>",
-			player.Username, player.LastWords)
-	} else {
-		lastWordsVars := []string{
-			"Men o'yin paytida boshqa uxlamayma-a-a-a-a-a-an!",
-			"Bu adolatsizlik! Men begunohman!!!",
-			"Siz pushaymon bo'lasizlar...",
-			"Hali ko'rasizlar meni kim ekanimni!",
-		}
-		msg += fmt.Sprintf("\n\n💬 O'limidan oldin kimdir <b>%s</b> qichqirganini eshitdi:\n<i>%s</i>",
-			player.Username, lastWordsVars[rand.Intn(len(lastWordsVars))])
+	lastWords := []string{
+		"Men o'yin paytida boshqa uxlamayma-a-a-a-a-a-an!",
+		"Bu adolatsizlik! Men begunohman!!!",
+		"Siz pushaymon bo'lasizlar...",
+		"Hali ko'rasizlar meni kim ekanimni!",
 	}
+	msg += fmt.Sprintf("\n\n💬 O'limidan oldin kimdir <b>%s</b> qichqirganini eshitdi:\n<i>%s</i>",
+		player.Username, lastWords[rand.Intn(len(lastWords))])
 
 	return msg
 }
@@ -82,8 +64,7 @@ func VoteOutMessage(player *Player) string {
 		"🗳 Ovoz berish yakuni: <b>%s</b> chiqarib yuborildi.\nRoli: %s %s",
 		"👋 <b>%s</b> shahardan haydaldi.\nRoli: %s %s",
 	}
-	msg := msgs[rand.Intn(len(msgs))]
-	return fmt.Sprintf(msg, player.Username, roleInfo.Emoji, string(player.Role))
+	return fmt.Sprintf(msgs[rand.Intn(len(msgs))], player.Username, roleInfo.Emoji, string(player.Role))
 }
 
 func NoVoteMessage() string {
@@ -123,17 +104,11 @@ func DaydiResultMsg(target *Player, visitors []*Player) string {
 	}
 	names := make([]string, len(visitors))
 	for i, v := range visitors {
-		roleInfo := roles.Get(v.Role)
-		names[i] = fmt.Sprintf("%s %s", roleInfo.Emoji, v.Username)
+		info := roles.Get(v.Role)
+		names[i] = fmt.Sprintf("%s %s", info.Emoji, v.Username)
 	}
 	return fmt.Sprintf("🧙🏻‍♂️ <b>Daydi</b> <b>%s</b> uyida tunadi.\nKecha unikiga kelganlar: %s",
 		target.Username, strings.Join(names, ", "))
-}
-
-func BlockedMessage(target *Player) string {
-	roleInfo := roles.Get(target.Role)
-	return fmt.Sprintf("💃 <b>Mashuqa</b> <b>%s</b> bilan tunni o'tkazdi.\n%s %s tunda harakat qila olmadi.",
-		target.Username, roleInfo.Emoji, target.Username)
 }
 
 func DonInheritMessage(newDon *Player) string {
@@ -176,7 +151,6 @@ func WinMessage(winner string, players []*Player) string {
 		subtitle = "Aholi uni chiqarib yubordi — va u yutdi!"
 	default:
 		title = "🏁 <b>O'YIN TUGADI</b>"
-		subtitle = ""
 	}
 
 	msg := title
@@ -185,12 +159,12 @@ func WinMessage(winner string, players []*Player) string {
 	}
 	msg += "\n\n<b>O'yinchilar rollari:</b>\n"
 	for _, p := range players {
-		roleInfo := roles.Get(p.Role)
+		info := roles.Get(p.Role)
 		status := "☠️"
 		if p.IsAlive {
 			status = "✅"
 		}
-		msg += fmt.Sprintf("%s %s %s — %s\n", status, roleInfo.Emoji, p.Username, string(p.Role))
+		msg += fmt.Sprintf("%s %s %s — %s\n", status, info.Emoji, p.Username, string(p.Role))
 	}
 	return msg
 }
@@ -213,9 +187,9 @@ func PlayerLeftMsg(username string, count, max int) string {
 }
 
 func RolePrivateMsg(player *Player) string {
-	roleInfo := roles.Get(player.Role)
+	info := roles.Get(player.Role)
 	return fmt.Sprintf("🎭 <b>Sizning rolingiz:</b>\n\n%s <b>%s</b>\n\n<i>%s</i>",
-		roleInfo.Emoji, string(player.Role), roleInfo.Description)
+		info.Emoji, string(player.Role), info.Description)
 }
 
 func VotingMsg(players []*Player) string {
@@ -225,27 +199,4 @@ func VotingMsg(players []*Player) string {
 		msg += fmt.Sprintf("%d. %s\n", i+1, p.Username)
 	}
 	return msg
-}
-
-func LastWordsPrompt(playerName string) string {
-	return fmt.Sprintf("⚰️ <b>%s</b>, siz o'ldirilayapsiz!\n\nSo'nggi so'zlaringizni kiriting (20 soniya):", playerName)
-}
-
-// Tuna xabari (True Mafia Black uslubi)
-func NightActionAnnouncement(roleName roles.RoleName, targetName string) string {
-	roleInfo := roles.Get(roleName)
-	switch roleName {
-	case roles.RoleDoctor:
-		return fmt.Sprintf("%s <b>Shifokor</b> tungi navbatchilikka ketdi...", roleInfo.Emoji)
-	case roles.RoleKomissar:
-		return fmt.Sprintf("%s <b>Komissar Katani</b> yovuzlarni qidirishga ketdi...", roleInfo.Emoji)
-	case roles.RoleMafia, roles.RoleDon:
-		return fmt.Sprintf("%s <b>Mafia</b> qurbonini tanladi...", roleInfo.Emoji)
-	case roles.RoleMashuqa:
-		return fmt.Sprintf("%s <b>Mashuqa</b> mehmonxonaga ketdi...", roleInfo.Emoji)
-	case roles.RoleDaydi:
-		return fmt.Sprintf("%s <b>Daydi</b> kuzatuv postiga ketdi...", roleInfo.Emoji)
-	default:
-		return ""
-	}
 }

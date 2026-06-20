@@ -17,15 +17,15 @@ var upgrader = websocket.Upgrader{
 }
 
 const (
-	MsgTypeRoomInfo    = "room_info"
-	MsgTypeRoleReveal  = "role_reveal"
-	MsgTypeGameState   = "game_state"
-	MsgTypePhaseChange = "phase_change"
-	MsgTypePlayerDied  = "player_died"
-	MsgTypeGameEnd     = "game_end"
-	MsgTypeChat        = "chat"
-	MsgTypeVoiceSignal = "voice_signal"
-	MsgTypeNightResult = "night_result"
+	MsgTypeRoomInfo      = "room_info"
+	MsgTypeRoleReveal    = "role_reveal"
+	MsgTypeGameState     = "game_state"
+	MsgTypePhaseChange   = "phase_change"
+	MsgTypePlayerDied    = "player_died"
+	MsgTypeGameEnd       = "game_end"
+	MsgTypeChat          = "chat"
+	MsgTypeVoiceSignal   = "voice_signal"
+	MsgTypeNightResult   = "night_result"
 	MsgTypeSheriffResult = "sheriff_result"
 )
 
@@ -37,11 +37,11 @@ type WSMessage struct {
 }
 
 type PlayerInfo struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	IsAlive  bool   `json:"is_alive"`
-	Role     string `json:"role,omitempty"`
-	Emoji    string `json:"emoji,omitempty"`
+	ID      int64  `json:"id"`
+	Name    string `json:"name"`
+	IsAlive bool   `json:"is_alive"`
+	Role    string `json:"role,omitempty"`
+	Emoji   string `json:"emoji,omitempty"`
 }
 
 type RoleRevealPayload struct {
@@ -72,13 +72,13 @@ type Client struct {
 	userID int64
 }
 
-type BroadcastMsg struct {
+type broadcastMsg struct {
 	roomID  string
 	message []byte
 	exclude int64
 }
 
-type DirectMsg struct {
+type directMsg struct {
 	userID  int64
 	message []byte
 }
@@ -87,8 +87,8 @@ type Hub struct {
 	rooms      map[string]map[*Client]bool
 	register   chan *Client
 	unregister chan *Client
-	broadcast  chan *BroadcastMsg
-	direct     chan *DirectMsg
+	broadcast  chan *broadcastMsg
+	direct     chan *directMsg
 	mu         sync.RWMutex
 
 	OnConnect    func(roomID string, userID int64)
@@ -103,8 +103,8 @@ func NewHub() *Hub {
 		rooms:      make(map[string]map[*Client]bool),
 		register:   make(chan *Client, 256),
 		unregister: make(chan *Client, 256),
-		broadcast:  make(chan *BroadcastMsg, 256),
-		direct:     make(chan *DirectMsg, 256),
+		broadcast:  make(chan *broadcastMsg, 256),
+		direct:     make(chan *directMsg, 256),
 	}
 }
 
@@ -118,7 +118,7 @@ func (h *Hub) Run() {
 			}
 			h.rooms[client.roomID][client] = true
 			h.mu.Unlock()
-			log.Printf("✅ WS: user %d → room %s", client.userID, client.roomID)
+			log.Printf("[hub] user %d connected to room %s", client.userID, client.roomID)
 			if h.OnConnect != nil {
 				go h.OnConnect(client.roomID, client.userID)
 			}
@@ -164,17 +164,25 @@ func (h *Hub) Run() {
 }
 
 func (h *Hub) BroadcastToRoom(roomID, msgType string, payload interface{}) {
-	data, _ := json.Marshal(payload)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[hub] marshal error: %v", err)
+		return
+	}
 	msg := WSMessage{Type: msgType, RoomID: roomID, Payload: data}
 	bytes, _ := json.Marshal(msg)
-	h.broadcast <- &BroadcastMsg{roomID: roomID, message: bytes}
+	h.broadcast <- &broadcastMsg{roomID: roomID, message: bytes}
 }
 
 func (h *Hub) SendToUser(userID int64, msgType string, payload interface{}) {
-	data, _ := json.Marshal(payload)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[hub] marshal error: %v", err)
+		return
+	}
 	msg := WSMessage{Type: msgType, UserID: userID, Payload: data}
 	bytes, _ := json.Marshal(msg)
-	h.direct <- &DirectMsg{userID: userID, message: bytes}
+	h.direct <- &directMsg{userID: userID, message: bytes}
 }
 
 func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -184,17 +192,26 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "room and user required", http.StatusBadRequest)
 		return
 	}
+
 	userID, err := strconv.ParseInt(userIDStr, 10, 64)
 	if err != nil {
 		http.Error(w, "invalid user id", http.StatusBadRequest)
 		return
 	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("WS upgrade error: %v", err)
+		log.Printf("[hub] upgrade error: %v", err)
 		return
 	}
-	client := &Client{conn: conn, send: make(chan []byte, 256), hub: h, roomID: roomID, userID: userID}
+
+	client := &Client{
+		conn:   conn,
+		send:   make(chan []byte, 256),
+		hub:    h,
+		roomID: roomID,
+		userID: userID,
+	}
 	h.register <- client
 	go client.writePump()
 	go client.readPump()
@@ -205,15 +222,18 @@ func (c *Client) readPump() {
 		c.hub.unregister <- c
 		c.conn.Close()
 	}()
+
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
 			break
 		}
+
 		var msg WSMessage
 		if err := json.Unmarshal(message, &msg); err != nil {
 			continue
 		}
+
 		var payload map[string]interface{}
 		if msg.Payload != nil {
 			json.Unmarshal(msg.Payload, &payload)
@@ -221,7 +241,11 @@ func (c *Client) readPump() {
 
 		switch msg.Type {
 		case MsgTypeVoiceSignal, MsgTypeChat:
-			c.hub.broadcast <- &BroadcastMsg{roomID: c.roomID, message: message, exclude: c.userID}
+			c.hub.broadcast <- &broadcastMsg{
+				roomID:  c.roomID,
+				message: message,
+				exclude: c.userID,
+			}
 
 		case "start_game":
 			if c.hub.OnStartGame != nil {

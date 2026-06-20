@@ -3,7 +3,9 @@ package handlers
 import (
 	"fmt"
 	"log"
+
 	"mafia-bot/db/repositories"
+
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
@@ -17,11 +19,11 @@ type Product struct {
 }
 
 var Products = []Product{
-	{"coins_500",  "500 Tanga",     "💰", "O'yinda ishlatish uchun 500 tanga",    15,  500},
-	{"coins_1500", "1500 Tanga",    "💎", "O'yinda ishlatish uchun 1500 tanga",   40,  1500},
-	{"coins_5000", "5000 Tanga",    "👑", "O'yinda ishlatish uchun 5000 tanga",  120, 5000},
-	{"xp_boost",   "2x XP (7 kun)", "⚡", "7 kun davomida 2 baravar XP yig'asiz", 50,  100},
-	{"vip_badge",  "VIP Nishon",    "🏆", "VIP nishon va bonuslar",              100, 200},
+	{"coins_500", "500 Tanga", "O'yinda ishlatish uchun 500 tanga", "💰", 15, 500},
+	{"coins_1500", "1500 Tanga", "O'yinda ishlatish uchun 1500 tanga", "💎", 40, 1500},
+	{"coins_5000", "5000 Tanga", "O'yinda ishlatish uchun 5000 tanga", "👑", 120, 5000},
+	{"xp_boost", "2x XP (7 kun)", "7 kun davomida 2 baravar XP yig'asiz", "⚡", 50, 100},
+	{"vip_badge", "VIP Nishon", "VIP nishon va bonuslar", "🏆", 100, 200},
 }
 
 type PaymentHandler struct {
@@ -34,15 +36,12 @@ func NewPaymentHandler(bot *tgbotapi.BotAPI, userRepo *repositories.UserReposito
 }
 
 func (h *PaymentHandler) Handle(update tgbotapi.Update) {
-	if update.PreCheckoutQuery != nil {
+	switch {
+	case update.PreCheckoutQuery != nil:
 		h.bot.Request(tgbotapi.PreCheckoutConfig{PreCheckoutQueryID: update.PreCheckoutQuery.ID, OK: true})
-		return
-	}
-	if update.Message != nil && update.Message.SuccessfulPayment != nil {
+	case update.Message != nil && update.Message.SuccessfulPayment != nil:
 		h.handleSuccess(update.Message)
-		return
-	}
-	if update.Message != nil && update.Message.IsCommand() {
+	case update.Message != nil && update.Message.IsCommand():
 		switch update.Message.Command() {
 		case "buy", "shop_stars":
 			h.showShop(update.Message.Chat.ID)
@@ -55,6 +54,7 @@ func (h *PaymentHandler) Handle(update tgbotapi.Update) {
 func (h *PaymentHandler) showShop(chatID int64) {
 	text := "🛍 <b>STARS DO'KONI</b>\n\nTelegram Stars orqali xarid qiling:\n\n"
 	var rows [][]tgbotapi.InlineKeyboardButton
+
 	for _, p := range Products {
 		text += fmt.Sprintf("%s <b>%s</b> — %d ⭐\n%s\n\n", p.Emoji, p.Title, p.Stars, p.Description)
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
@@ -64,6 +64,7 @@ func (h *PaymentHandler) showShop(chatID int64) {
 			),
 		))
 	}
+
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "HTML"
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
@@ -89,27 +90,36 @@ func (h *PaymentHandler) showDonate(chatID int64) {
 func (h *PaymentHandler) SendInvoice(chatID int64, productID string) {
 	var p *Product
 	for i := range Products {
-		if Products[i].ID == productID { p = &Products[i]; break }
+		if Products[i].ID == productID {
+			p = &Products[i]
+			break
+		}
 	}
-	if p == nil { return }
+	if p == nil {
+		return
+	}
+
 	invoice := tgbotapi.InvoiceConfig{
-		BaseChat:             tgbotapi.BaseChat{ChatID: chatID},
-		Title:                p.Emoji + " " + p.Title,
-		Description:          p.Description,
-		Payload:              p.ID,
-		Currency:             "XTR",
-		Prices:               []tgbotapi.LabeledPrice{{Label: p.Title, Amount: p.Stars}},
+		BaseChat:            tgbotapi.BaseChat{ChatID: chatID},
+		Title:               p.Emoji + " " + p.Title,
+		Description:         p.Description,
+		Payload:             p.ID,
+		Currency:            "XTR",
+		Prices:              []tgbotapi.LabeledPrice{{Label: p.Title, Amount: p.Stars}},
 		SuggestedTipAmounts: []int{p.Stars},
 	}
 	if _, err := h.bot.Send(invoice); err != nil {
-		log.Printf("Invoice xato: %v", err)
+		log.Printf("[payment] invoice error: %v", err)
 	}
 }
 
 func (h *PaymentHandler) handleSuccess(msg *tgbotapi.Message) {
 	pay := msg.SuccessfulPayment
 	user, err := h.userRepo.GetOrCreate(msg.From.ID, msg.From.UserName, msg.From.FirstName)
-	if err != nil { return }
+	if err != nil {
+		return
+	}
+
 	var text string
 	for _, p := range Products {
 		if p.ID == pay.InvoicePayload {
@@ -120,14 +130,20 @@ func (h *PaymentHandler) handleSuccess(msg *tgbotapi.Message) {
 			break
 		}
 	}
-	if text == "" { text = "✅ Xarid muvaffaqiyatli!" }
+
+	if text == "" {
+		text = "✅ Xarid muvaffaqiyatli!"
+	}
+
 	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
 	reply.ParseMode = "HTML"
 	h.bot.Send(reply)
 }
 
 func (h *PaymentHandler) HandleCallback(query *tgbotapi.CallbackQuery) bool {
-	if len(query.Data) < 4 || query.Data[:4] != "buy_" { return false }
+	if len(query.Data) < 4 || query.Data[:4] != "buy_" {
+		return false
+	}
 	h.bot.Request(tgbotapi.NewCallback(query.ID, ""))
 	h.SendInvoice(query.Message.Chat.ID, query.Data[4:])
 	return true

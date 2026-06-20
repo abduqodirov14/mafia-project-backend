@@ -36,19 +36,21 @@ func NewManager(bot *tgbotapi.BotAPI, hub *Hub, adminChatID int64, webAppURL, bo
 		webAppURL:   webAppURL,
 		botUsername: botUsername,
 	}
-	// Hub callbacklarini ulash
-	hub.OnConnect     = m.HandleWebConnect
-	hub.OnStartGame   = m.StartGameByOwner
+
+	hub.OnConnect = m.HandleWebConnect
+	hub.OnStartGame = m.StartGameByOwner
 	hub.OnNightAction = m.HandleNightAction
-	hub.OnDayVote     = m.HandleDayVote
+	hub.OnDayVote = m.HandleDayVote
+
 	return m
 }
 
-// ─── XONA BOSHQARUVI ───
+// ─── ROOM MANAGEMENT ───
 
 func (m *Manager) CreateRoom(chatID, ownerID int64, ownerName string) *Room {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
 	room := NewRoom(chatID, ownerID, ownerName)
 	m.rooms[room.ID] = room
 	if chatID != 0 {
@@ -56,6 +58,16 @@ func (m *Manager) CreateRoom(chatID, ownerID int64, ownerName string) *Room {
 	}
 	m.userRooms[ownerID] = room.ID
 	m.notifyAdmin(fmt.Sprintf("🏠 Yangi xona\nEga: <b>%s</b> | ID: <code>%s</code>", ownerName, room.ID))
+	return room
+}
+
+func (m *Manager) CreateRoomWeb(ownerID int64, ownerName string) *Room {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	room := NewRoom(0, ownerID, ownerName)
+	m.rooms[room.ID] = room
+	m.userRooms[ownerID] = room.ID
 	return room
 }
 
@@ -68,6 +80,7 @@ func (m *Manager) GetRoom(roomID string) *Room {
 func (m *Manager) GetRoomByChat(chatID int64) *Room {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
 	id, ok := m.chatRooms[chatID]
 	if !ok {
 		return nil
@@ -78,6 +91,7 @@ func (m *Manager) GetRoomByChat(chatID int64) *Room {
 func (m *Manager) GetRoomByUser(userID int64) *Room {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
 	id, ok := m.userRooms[userID]
 	if !ok {
 		return nil
@@ -88,6 +102,7 @@ func (m *Manager) GetRoomByUser(userID int64) *Room {
 func (m *Manager) JoinRoom(roomID string, player *Player) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
 	room, ok := m.rooms[roomID]
 	if !ok {
 		return fmt.Errorf("xona topilmadi")
@@ -103,6 +118,7 @@ func (m *Manager) JoinRoom(roomID string, player *Player) error {
 func (m *Manager) LeaveRoom(userID int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
 	roomID, ok := m.userRooms[userID]
 	if !ok {
 		return
@@ -114,24 +130,29 @@ func (m *Manager) LeaveRoom(userID int64) {
 	delete(m.userRooms, userID)
 }
 
-// ─── O'YIN BOSHLASH ───
+// ─── GAME LIFECYCLE ───
 
 func (m *Manager) StartGame(roomID string) error {
 	room := m.GetRoom(roomID)
 	if room == nil {
 		return fmt.Errorf("xona topilmadi")
 	}
+
 	players := room.GetPlayerList()
 	if len(players) < 4 {
 		return fmt.Errorf("kamida 4 o'yinchi kerak (hozir %d ta)", len(players))
 	}
-	room.Status = RoomPlaying
+
+	room.SetStatus(RoomPlaying)
+
 	state := NewGameState(roomID, room.ChatID)
 	m.mu.Lock()
 	m.states[roomID] = state
 	m.mu.Unlock()
+
 	m.assignRoles(room, state)
 	m.notifyAdmin(fmt.Sprintf("🎮 O'yin boshlandi!\nXona: <code>%s</code> | O'yinchilar: %d", roomID, len(players)))
+
 	go m.runGame(room, state)
 	return nil
 }
@@ -147,11 +168,34 @@ func (m *Manager) StartGameByOwner(roomID string, ownerID int64) error {
 	return m.StartGame(roomID)
 }
 
-// ─── ROL TAQSIMLASH ───
+func (m *Manager) ForceStopGame(roomID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	room, ok := m.rooms[roomID]
+	if !ok {
+		return
+	}
+
+	m.unmuteAll(room)
+	delete(m.states, roomID)
+	for _, p := range room.Players {
+		delete(m.userRooms, p.TelegramID)
+	}
+	delete(m.chatRooms, room.ChatID)
+	delete(m.rooms, roomID)
+}
+
+func (m *Manager) GetState(roomID string) *GameState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.states[roomID]
+}
+
+// ─── ROLE ASSIGNMENT ───
 
 func (m *Manager) assignRoles(room *Room, state *GameState) {
 	players := room.GetPlayerList()
-	rand.Seed(time.Now().UnixNano())
 	rand.Shuffle(len(players), func(i, j int) {
 		players[i], players[j] = players[j], players[i]
 	})
@@ -159,34 +203,26 @@ func (m *Manager) assignRoles(room *Room, state *GameState) {
 	assigned := roles.AssignRoles(len(players))
 	for i, p := range players {
 		p.Role = assigned[i]
-		// Komissar ID ni saqlash
 		if p.Role == roles.RoleKomissar {
 			state.KomissarID = p.TelegramID
 		}
 	}
 
-	// Har bir o'yinchiga rol yuborish
 	for _, p := range players {
 		roleInfo := roles.Get(p.Role)
-		privateMsg := RolePrivateMsg(p)
+		msg := tgbotapi.NewMessage(p.TelegramID, RolePrivateMsg(p))
+		msg.ParseMode = "HTML"
 
+		if m.webAppURL != "" && !isBot(p.TelegramID) {
+			webBtn := makeWebAppButton("🎮 O'yinga kirish (WebApp)", m.webAppURL+"?room="+room.ID)
+			msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+				tgbotapi.NewInlineKeyboardRow(webBtn),
+			)
+		}
 		if !isBot(p.TelegramID) {
-			msg := tgbotapi.NewMessage(p.TelegramID, privateMsg)
-			msg.ParseMode = "HTML"
-			// WebApp tugmasi
-			if m.webAppURL != "" {
-				webAppBtn := makeWebAppButton(
-					"🎮 O'yinga kirish (WebApp)",
-					m.webAppURL+"?room="+room.ID,
-				)
-				msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
-					tgbotapi.NewInlineKeyboardRow(webAppBtn),
-				)
-			}
 			go m.bot.Send(msg)
 		}
 
-		// WebApp ga ham yuborish
 		m.hub.SendToUser(p.TelegramID, MsgTypeRoleReveal, RoleRevealPayload{
 			Role:        string(p.Role),
 			Description: roleInfo.Description,
@@ -194,7 +230,6 @@ func (m *Manager) assignRoles(room *Room, state *GameState) {
 		})
 	}
 
-	// Guruhga o'yinchilar ro'yxati va rollar sonini yuborish
 	m.sendRolesSummary(room)
 }
 
@@ -211,40 +246,35 @@ func (m *Manager) sendRolesSummary(room *Room) {
 	}
 	text += "\n<b>Ulardan kimlar:</b>\n"
 
-	roleSummary := ""
+	var parts []string
 	for role, count := range roleCount {
 		info := roles.Get(role)
 		if count > 1 {
-			roleSummary += fmt.Sprintf("%s %s - %d, ", info.Emoji, string(role), count)
+			parts = append(parts, fmt.Sprintf("%s %s - %d", info.Emoji, string(role), count))
 		} else {
-			roleSummary += fmt.Sprintf("%s %s, ", info.Emoji, string(role))
+			parts = append(parts, fmt.Sprintf("%s %s", info.Emoji, string(role)))
 		}
 	}
-	if len(roleSummary) > 2 {
-		roleSummary = roleSummary[:len(roleSummary)-2]
-	}
-	text += roleSummary
+	text += joinWithComma(parts)
 	text += fmt.Sprintf("\nJami: %d kishi.", len(players))
 	text += "\n\n<i>Tunda bo'lgan hodisalarni muhokama qilishning ayni vaqti...</i>"
 
 	m.sendToChat(room.ChatID, text)
 }
 
-// ─── ASOSIY O'YIN TSIKLI ───
+// ─── MAIN GAME LOOP ───
 
 func (m *Manager) runGame(room *Room, state *GameState) {
 	for {
 		state.Round++
 		state.Phase = PhaseNight
 
-		// Tun boshlanishi
 		m.sendToChat(room.ChatID, NightStartMsg(state.Round))
 		time.Sleep(1 * time.Second)
 		m.muteAll(room)
 		m.sendNightActions(room, state)
 		go m.runBotNightActions(room, state)
 
-		// WebApp ga tun fazasini yuborish
 		m.hub.BroadcastToRoom(room.ID, MsgTypePhaseChange, PhasePayload{
 			Phase:   "night",
 			Round:   state.Round,
@@ -253,22 +283,18 @@ func (m *Manager) runGame(room *Room, state *GameState) {
 		})
 		m.broadcastGameState(room, state)
 
-		// Tun harakatlarini e'lon qilish (True Mafia Black uslubi)
 		time.Sleep(3 * time.Second)
 		m.announceNightActions(room, state)
+		time.Sleep(57 * time.Second)
 
-		time.Sleep(57 * time.Second) // Jami 60 soniya
-
-		// Tun natijalarini qayta ishlash
 		m.processNight(room, state)
 
-		// Win tekshiruvi
 		if won, winner := m.checkWin(room); won {
 			m.endGame(room, state, winner)
 			return
 		}
 
-		// Kun fazasi
+		// DAY PHASE
 		state.Phase = PhaseDay
 		m.unmuteAlive(room)
 
@@ -281,7 +307,7 @@ func (m *Manager) runGame(room *Room, state *GameState) {
 
 		time.Sleep(90 * time.Second)
 
-		// Ovoz berish
+		// VOTING PHASE
 		state.Phase = PhaseVoting
 		state.ResetVoting()
 		m.startVoting(room, state)
@@ -295,7 +321,6 @@ func (m *Manager) runGame(room *Room, state *GameState) {
 
 		time.Sleep(60 * time.Second)
 
-		// Ovoz natijasi
 		m.processVoting(room, state)
 
 		if won, winner := m.checkWin(room); won {
@@ -307,18 +332,17 @@ func (m *Manager) runGame(room *Room, state *GameState) {
 	}
 }
 
-// ─── TUN HARAKATLARINI E'LON QILISH ───
+// ─── NIGHT PHASE ───
 
 func (m *Manager) announceNightActions(room *Room, state *GameState) {
-	// Har bir rol harakatini ketma-ket e'lon qilish (True Mafia Black uslubi)
-	announcements := []string{}
+	var announcements []string
 
 	for _, p := range room.AlivePlayers() {
 		switch p.Role {
 		case roles.RoleDoctor:
 			announcements = append(announcements, "👨‍⚕️ <b>Shifokor</b> tungi navbatchilikka ketdi...")
 		case roles.RoleKomissar:
-			if state.Round > 1 { // 1-tunda tekshiruv qila olmaydi
+			if state.Round > 1 {
 				announcements = append(announcements, "🕵🏼 <b>Komissar Katani</b> yovuzlarni qidirishga ketdi...")
 			}
 		case roles.RoleDon, roles.RoleMafia:
@@ -340,159 +364,115 @@ func (m *Manager) announceNightActions(room *Room, state *GameState) {
 	}
 }
 
-// ─── TUN NATIJALARINI QAYTA ISHLASH ───
-
 func (m *Manager) processNight(room *Room, state *GameState) {
 	night := state.Night
 
-	// Mashuqa bloklangan odamlarni aniqlash
-	blockedID := night.MashuqaTargetID
-	if blockedID != 0 {
-		if p, ok := room.Players[blockedID]; ok {
+	// Block target if mashuqa acted
+	if night.MashuqaTargetID != 0 {
+		if p, ok := room.PlayerByID(night.MashuqaTargetID); ok {
 			p.IsBlocked = true
 		}
 	}
 
-	// Asosiy o'ldirish
-	killedID := night.MafiaTargetID
-	manyakKilledID := night.ManyakTargetID
-
-	// Shifokor saqladi?
-	savedByDoctor := night.DoctorTargetID
-
-	// Manyak jabrlanuvchisi
-	if manyakKilledID != 0 && manyakKilledID != savedByDoctor {
-		if p, ok := room.Players[manyakKilledID]; ok && p.IsAlive {
+	// Maniac kill
+	if night.ManyakTargetID != 0 && night.ManyakTargetID != night.DoctorTargetID {
+		if p, ok := room.PlayerByID(night.ManyakTargetID); ok && p.IsAlive {
 			p.IsAlive = false
 			m.sendToChat(room.ChatID, DeathMessage(p, roles.RoleManyak))
-			m.hub.BroadcastToRoom(room.ID, MsgTypePlayerDied, map[string]interface{}{
-				"player_id": p.TelegramID, "name": p.Username, "role": string(p.Role),
-			})
-			// Kamikaze
+			m.broadcastPlayerDied(room, p)
 			if p.Role == roles.RoleKamikaze {
 				m.handleKamikazeDeath(room, state, p, false)
 			}
 		}
 	}
 
-	// Mafia jabrlanuvchisi
-	if killedID != 0 && killedID != savedByDoctor {
-		if p, ok := room.Players[killedID]; ok && p.IsAlive {
-			// Mashuqa bloklagan odamni o'ldirish mumkinmi?
-			killerRole := m.getMafiaRole(room)
-
+	// Mafia kill
+	killedID := night.MafiaTargetID
+	if killedID != 0 && killedID != night.DoctorTargetID {
+		if p, ok := room.PlayerByID(killedID); ok && p.IsAlive {
+			killerRole := m.findAliveMafiaRole(room)
 			p.IsAlive = false
 			m.sendToChat(room.ChatID, DeathMessage(p, killerRole))
-			time.Sleep(500 * time.Millisecond)
+			m.broadcastPlayerDied(room, p)
 
-			m.hub.BroadcastToRoom(room.ID, MsgTypePlayerDied, map[string]interface{}{
-				"player_id": p.TelegramID, "name": p.Username, "role": string(p.Role),
-			})
-
-			// Kamikaze
 			if p.Role == roles.RoleKamikaze {
 				m.handleKamikazeDeath(room, state, p, true)
 			}
-
-			// Don o'lsa — meros
 			if p.Role == roles.RoleDon {
 				m.handleDonDeath(room)
 			}
-
-			// Komissar o'lsa — Serjant meros oladi
 			if p.Role == roles.RoleKomissar {
 				m.handleKomissarDeath(room, state)
 			}
 		}
-	} else if killedID != 0 && killedID == savedByDoctor {
+	} else if killedID != 0 && killedID == night.DoctorTargetID {
 		m.sendToChat(room.ChatID, SavedMessage(m.getPlayerName(room, killedID)))
 	} else {
 		m.sendToChat(room.ChatID, NobodyDiedMsg())
 	}
 
-	// Daydi natijasi
-	if night.DaydiTargetID != 0 && state.KomissarID != 0 {
-		if targetPlayer, ok := room.Players[night.DaydiTargetID]; ok {
-			visitors := m.getNightVisitors(room, state, night.DaydiTargetID)
+	// Daydi result
+	if night.DaydiTargetID != 0 {
+		if targetPlayer, ok := room.PlayerByID(night.DaydiTargetID); ok {
+			visitors := m.getNightVisitors(room, night.DaydiTargetID)
 			result := DaydiResultMsg(targetPlayer, visitors)
-			// Daydi ga shaxsan yuborish
-			if daydiPlayer := m.findPlayerByRole(room, roles.RoleDaydi); daydiPlayer != nil {
-				if !isBot(daydiPlayer.TelegramID) {
-					msg := tgbotapi.NewMessage(daydiPlayer.TelegramID, result)
-					msg.ParseMode = "HTML"
-					m.bot.Send(msg)
-				}
-				m.hub.SendToUser(daydiPlayer.TelegramID, MsgTypeNightResult, map[string]string{"result": result})
+			if daydi := m.findPlayerByRole(room, roles.RoleDaydi); daydi != nil && !isBot(daydi.TelegramID) {
+				msg := tgbotapi.NewMessage(daydi.TelegramID, result)
+				msg.ParseMode = "HTML"
+				m.bot.Send(msg)
+				m.hub.SendToUser(daydi.TelegramID, MsgTypeNightResult, map[string]string{"result": result})
 			}
 		}
 	}
 
-	// Komissar natijasi (2-tun va undan keyin)
+	// Komissar result (round 2+)
 	if night.KomissarTargetID != 0 && state.Round > 1 {
-		if targetPlayer, ok := room.Players[night.KomissarTargetID]; ok {
+		if targetPlayer, ok := room.PlayerByID(night.KomissarTargetID); ok {
 			isMafia := roles.IsMafia(targetPlayer.Role)
-			// Advokat himoyasi
 			if targetPlayer.Role == roles.RoleAdvokat {
-				isMafia = false // Advokat Komissar oldida tinch aholi ko'rinadi
+				isMafia = false
 			}
 			result := KomissarResultMsg(targetPlayer, isMafia)
-			komissarID := state.KomissarID
-			if komissarPlayer, ok := room.Players[komissarID]; ok {
-				if !isBot(komissarPlayer.TelegramID) {
-					msg := tgbotapi.NewMessage(komissarPlayer.TelegramID, result)
-					msg.ParseMode = "HTML"
-					m.bot.Send(msg)
-				}
-				m.hub.SendToUser(komissarPlayer.TelegramID, MsgTypeSheriffResult, map[string]interface{}{
+			if komissar, ok := room.PlayerByID(state.KomissarID); ok && !isBot(komissar.TelegramID) {
+				msg := tgbotapi.NewMessage(komissar.TelegramID, result)
+				msg.ParseMode = "HTML"
+				m.bot.Send(msg)
+				m.hub.SendToUser(komissar.TelegramID, MsgTypeSheriffResult, map[string]interface{}{
 					"target": targetPlayer.Username, "is_mafia": isMafia, "result": result,
 				})
 			}
 		}
 	}
 
-	// Bloklangan holatni tozalash
+	// Reset blocked state
 	for _, p := range room.Players {
 		p.IsBlocked = false
 	}
 }
 
-func (m *Manager) getMafiaRole(room *Room) roles.RoleName {
-	for _, p := range room.Players {
-		if p.IsAlive && (p.Role == roles.RoleDon || p.Role == roles.RoleMafia) {
-			return p.Role
-		}
-	}
-	return roles.RoleMafia
-}
+// ─── KAMIKAZE / DON / KOMISSAR DEATH HANDLERS ───
 
 func (m *Manager) handleKamikazeDeath(room *Room, state *GameState, kamikaze *Player, wasShot bool) {
-	// Otib o'ldirilsa — otgan odam ham o'ladi
 	if wasShot {
-		killerID := state.Night.MafiaTargetID
-		if killer, ok := room.Players[killerID]; ok {
-			_ = killer // handled above, but kamikaze kills the SHOOTER
-			// Find who voted for kamikaze
-			for voterID := range state.Night.MafiaVotes {
-				if voter, ok := room.Players[voterID]; ok && voter.IsAlive {
-					voter.IsAlive = false
-					m.sendToChat(room.ChatID, KamikazeDeathMessage(kamikaze, voter))
-					break
-				}
+		for voterID := range state.Night.MafiaVotes {
+			if voter, ok := room.PlayerByID(voterID); ok && voter.IsAlive {
+				voter.IsAlive = false
+				m.sendToChat(room.ChatID, KamikazeDeathMessage(kamikaze, voter))
+				return
 			}
 		}
 	} else {
-		// Osilsa — bitta odamni olib ketadi
 		alive := room.AlivePlayers()
 		if len(alive) > 0 {
 			target := alive[rand.Intn(len(alive))]
 			target.IsAlive = false
-			m.sendToChat(room.ChatID, fmt.Sprintf("💣 <b>Kamikaze</b> osilganda portlab, <b>%s</b> ni ham olib ketdi!", target.Username))
+			m.sendToChat(room.ChatID, fmt.Sprintf(
+				"💣 <b>Kamikaze</b> osilganda portlab, <b>%s</b> ni ham olib ketdi!", target.Username))
 		}
 	}
 }
 
 func (m *Manager) handleDonDeath(room *Room) {
-	// Don o'lganda — Mafia Don bo'ladi
 	for _, p := range room.Players {
 		if p.IsAlive && p.Role == roles.RoleMafia {
 			p.Role = roles.RoleDon
@@ -508,7 +488,6 @@ func (m *Manager) handleDonDeath(room *Room) {
 }
 
 func (m *Manager) handleKomissarDeath(room *Room, state *GameState) {
-	// Komissar o'lganda — Serjant uni o'rnini oladi
 	for _, p := range room.Players {
 		if p.IsAlive && p.Role == roles.RoleSerjant {
 			p.Role = roles.RoleKomissar
@@ -524,119 +503,7 @@ func (m *Manager) handleKomissarDeath(room *Room, state *GameState) {
 	}
 }
 
-func (m *Manager) getNightVisitors(room *Room, state *GameState, targetID int64) []*Player {
-	var visitors []*Player
-	night := state.Night
-	if night.MafiaTargetID == targetID {
-		for voterID := range night.MafiaVotes {
-			if p, ok := room.Players[voterID]; ok {
-				visitors = append(visitors, p)
-			}
-		}
-	}
-	if night.DoctorTargetID == targetID {
-		if p := m.findPlayerByRole(room, roles.RoleDoctor); p != nil {
-			visitors = append(visitors, p)
-		}
-	}
-	return visitors
-}
-
-func (m *Manager) findPlayerByRole(room *Room, role roles.RoleName) *Player {
-	for _, p := range room.Players {
-		if p.IsAlive && p.Role == role {
-			return p
-		}
-	}
-	return nil
-}
-
-func (m *Manager) getPlayerName(room *Room, id int64) string {
-	if p, ok := room.Players[id]; ok {
-		return p.Username
-	}
-	return "Noma'lum"
-}
-
-// ─── TUN HARAKATLARI ───
-
-func (m *Manager) sendNightActions(room *Room, state *GameState) {
-	for _, p := range room.AlivePlayers() {
-		if isBot(p.TelegramID) || !roles.HasNightAction(p.Role) {
-			continue
-		}
-		targets := m.getTargetsForRole(room, p)
-		if len(targets) == 0 {
-			continue
-		}
-		var keyboard [][]tgbotapi.InlineKeyboardButton
-		for _, target := range targets {
-			info := roles.Get(target.Role)
-			_ = info
-			row := tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData(
-					"👤 "+target.Username,
-					fmt.Sprintf("%s_%s_%d", string(p.Role), room.ID, target.TelegramID),
-				),
-			)
-			keyboard = append(keyboard, row)
-		}
-		text := m.getNightActionText(p.Role, state.Round)
-		msg := tgbotapi.NewMessage(p.TelegramID, text)
-		msg.ParseMode = "HTML"
-		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(keyboard...)
-		m.bot.Send(msg)
-	}
-}
-
-func (m *Manager) getTargetsForRole(room *Room, player *Player) []*Player {
-	var targets []*Player
-	switch player.Role {
-	case roles.RoleMafia, roles.RoleDon:
-		// Mafia mafia bo'lmaganlarni tanlaydi
-		for _, p := range room.AlivePlayers() {
-			if p.TelegramID != player.TelegramID && !roles.IsMafia(p.Role) {
-				targets = append(targets, p)
-			}
-		}
-	default:
-		// Boshqalar istalgan odamni tanlashi mumkin (o'zlari tashqari)
-		for _, p := range room.AlivePlayers() {
-			if p.TelegramID != player.TelegramID {
-				targets = append(targets, p)
-			}
-		}
-	}
-	return targets
-}
-
-func (m *Manager) getNightActionText(role roles.RoleName, round int) string {
-	switch role {
-	case roles.RoleMafia, roles.RoleDon:
-		return "😈 <b>Kim sizning qurbonингиз?</b>"
-	case roles.RoleDoctor:
-		return "👨‍⚕️ <b>Kimni davolaysiz?</b>"
-	case roles.RoleKomissar:
-		if round == 1 {
-			return "🕵️ <b>1-tunda tekshiruv qila olmaysiz. Kuzating.</b>"
-		}
-		return "🕵️ <b>Kimni tekshirasiz?</b>"
-	case roles.RoleSerjant:
-		return "👮 <b>Kimni kuzatasiz?</b>"
-	case roles.RoleMashuqa:
-		return "💃 <b>Kim bilan tunni o'tkazasiz? (U harakat qila olmaydi)</b>"
-	case roles.RoleDaydi:
-		return "🧙 <b>Kim uyida tunaysiz? (Kelganlarni ko'rasiz)</b>"
-	case roles.RoleManyak:
-		return "🔪 <b>Kimni o'ldirasiz?</b>"
-	case roles.RoleTentak:
-		return "👨🏻‍🦲 <b>Kimga borasiz?</b>"
-	default:
-		return "🎯 <b>Maqsadingizni tanlang</b>"
-	}
-}
-
-// ─── NIGHT ACTION HANDLER ───
+// ─── NIGHT ACTION ROUTING ───
 
 func (m *Manager) HandleNightAction(roomID, roleName string, voterID, targetID int64) {
 	m.mu.Lock()
@@ -651,12 +518,10 @@ func (m *Manager) HandleNightAction(roomID, roleName string, voterID, targetID i
 		return
 	}
 
-	player, ok := room.Players[voterID]
+	player, ok := room.PlayerByID(voterID)
 	if !ok || !player.IsAlive {
 		return
 	}
-
-	// Bloklangan holda harakat qila olmaydi
 	if player.IsBlocked {
 		if !isBot(voterID) {
 			msg := tgbotapi.NewMessage(voterID, "🚫 Siz bu kecha harakat qila olmaysiz (Mashuqa blokadi)")
@@ -671,57 +536,25 @@ func (m *Manager) HandleNightAction(roomID, roleName string, voterID, targetID i
 	switch role {
 	case roles.RoleMafia, roles.RoleDon:
 		night.MafiaVotes[voterID] = targetID
-		// Ko'pchilik ovozi
-		counts := make(map[int64]int)
-		for _, t := range night.MafiaVotes {
-			counts[t]++
-		}
-		maxV := 0
-		for t, c := range counts {
-			if c > maxV {
-				maxV = c
-				night.MafiaTargetID = t
-			}
-		}
-		if !isBot(voterID) {
-			target := room.Players[targetID]
-			if target != nil {
-				msg := tgbotapi.NewMessage(voterID, fmt.Sprintf("✅ Tanlov qabul qilindi: <b>%s</b>", target.Username))
-				msg.ParseMode = "HTML"
-				m.bot.Send(msg)
-			}
-		}
+		night.MafiaTargetID = m.computeMafiaMajorityTarget(night.MafiaVotes)
+		m.sendConfirmation(voterID, room, targetID, "✅ Tanlov qabul qilindi")
 
 	case roles.RoleDoctor:
 		night.DoctorTargetID = targetID
-		if !isBot(voterID) {
-			target := room.Players[targetID]
-			if target != nil {
-				msg := tgbotapi.NewMessage(voterID, fmt.Sprintf("💊 <b>%s</b> davolanmoqda...", target.Username))
-				msg.ParseMode = "HTML"
-				m.bot.Send(msg)
-			}
-		}
+		m.sendConfirmation(voterID, room, targetID, "💊 Davolanmoqda...")
 
 	case roles.RoleKomissar, roles.RoleSerjant:
 		if state.Round == 1 {
-			return // 1-tunda tekshiruv qila olmaydi
+			return
 		}
 		night.KomissarTargetID = targetID
 
 	case roles.RoleMashuqa:
 		night.MashuqaTargetID = targetID
-		if target, ok := room.Players[targetID]; ok {
+		if target, ok := room.PlayerByID(targetID); ok {
 			target.IsBlocked = true
 		}
-		if !isBot(voterID) {
-			target := room.Players[targetID]
-			if target != nil {
-				msg := tgbotapi.NewMessage(voterID, fmt.Sprintf("💃 <b>%s</b> bilan tunni o'tkazmoqdasiz...", target.Username))
-				msg.ParseMode = "HTML"
-				m.bot.Send(msg)
-			}
-		}
+		m.sendConfirmation(voterID, room, targetID, "💃 bilan tunni o'tkazmoqdasiz...")
 
 	case roles.RoleDaydi:
 		night.DaydiTargetID = targetID
@@ -734,7 +567,34 @@ func (m *Manager) HandleNightAction(roomID, roleName string, voterID, targetID i
 	}
 }
 
-// ─── OVOZ BERISH ───
+func (m *Manager) computeMafiaMajorityTarget(votes map[int64]int64) int64 {
+	counts := make(map[int64]int)
+	for _, t := range votes {
+		counts[t]++
+	}
+	var winner int64
+	maxVotes := 0
+	for id, cnt := range counts {
+		if cnt > maxVotes {
+			maxVotes = cnt
+			winner = id
+		}
+	}
+	return winner
+}
+
+func (m *Manager) sendConfirmation(voterID int64, room *Room, targetID int64, prefix string) {
+	if isBot(voterID) {
+		return
+	}
+	if target, ok := room.PlayerByID(targetID); ok {
+		msg := tgbotapi.NewMessage(voterID, fmt.Sprintf("%s: <b>%s</b>", prefix, target.Username))
+		msg.ParseMode = "HTML"
+		m.bot.Send(msg)
+	}
+}
+
+// ─── VOTING ───
 
 func (m *Manager) startVoting(room *Room, state *GameState) {
 	alive := room.AlivePlayers()
@@ -757,6 +617,7 @@ func (m *Manager) startVoting(room *Room, state *GameState) {
 func (m *Manager) HandleDayVote(roomID string, voterID, targetID int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
 	state, ok := m.states[roomID]
 	if !ok || state.Phase != PhaseVoting {
 		return
@@ -764,9 +625,8 @@ func (m *Manager) HandleDayVote(roomID string, voterID, targetID int64) {
 	state.Voting.Votes[voterID] = targetID
 
 	if !isBot(voterID) {
-		room := m.rooms[roomID]
-		if room != nil {
-			if target, ok := room.Players[targetID]; ok {
+		if room := m.rooms[roomID]; room != nil {
+			if target, ok := room.PlayerByID(targetID); ok {
 				m.bot.Request(tgbotapi.NewCallback("", fmt.Sprintf("✅ %s uchun ovoz berildi", target.Username)))
 			}
 		}
@@ -784,6 +644,7 @@ func (m *Manager) processVoting(room *Room, state *GameState) {
 	for _, t := range votes {
 		counts[t]++
 	}
+
 	var winnerID int64
 	maxVotes, tie := 0, false
 	for id, cnt := range counts {
@@ -801,43 +662,35 @@ func (m *Manager) processVoting(room *Room, state *GameState) {
 		return
 	}
 
-	player, ok := room.Players[winnerID]
+	player, ok := room.PlayerByID(winnerID)
 	if !ok {
 		return
 	}
 
-	// Suidsid — ovoz bilan chiqarilsa u yutadi!
-	if player.Role == roles.RoleSuidsid {
-		m.sendToChat(room.ChatID, fmt.Sprintf("🧌 <b>SUIDSID %s chiqarib yuborildi!</b>\n\nU o'yinni YUTDI! Bu uning maqsadi edi!", player.Username))
+	switch player.Role {
+	case roles.RoleSuidsid:
+		m.sendToChat(room.ChatID, fmt.Sprintf(
+			"🧌 <b>SUIDSID %s chiqarib yuborildi!</b>\n\nU o'yinni YUTDI!", player.Username))
 		player.IsAlive = false
-		m.hub.BroadcastToRoom(room.ID, MsgTypePlayerDied, map[string]interface{}{
-			"player_id": winnerID, "name": player.Username, "role": string(player.Role), "voted_out": true,
-		})
+		m.broadcastPlayerDied(room, player)
 		m.endGame(room, state, "suidsid")
 		return
-	}
 
-	// Kamikaze — osilsa bitta odamni olib ketadi
-	if player.Role == roles.RoleKamikaze {
+	case roles.RoleKamikaze:
 		player.IsAlive = false
 		m.sendToChat(room.ChatID, VoteOutMessage(player))
 		m.handleKamikazeDeath(room, state, player, false)
 		return
 	}
 
-	// Oddiy chiqarish
+	// Normal vote-out
 	player.IsAlive = false
 	m.sendToChat(room.ChatID, VoteOutMessage(player))
-
 	if !isBot(winnerID) {
 		m.bot.Send(tgbotapi.NewMessage(winnerID, "😢 Siz o'yindan chiqarildingiz. Kuzatishda davom eting!"))
 	}
+	m.broadcastPlayerDied(room, player)
 
-	m.hub.BroadcastToRoom(room.ID, MsgTypePlayerDied, map[string]interface{}{
-		"player_id": winnerID, "name": player.Username, "role": string(player.Role), "voted_out": true,
-	})
-
-	// Komissar o'lsa meros
 	if player.Role == roles.RoleKomissar {
 		m.handleKomissarDeath(room, state)
 	}
@@ -856,18 +709,13 @@ func (m *Manager) runBotNightActions(room *Room, state *GameState) {
 		delay := time.Duration(3000+rand.Intn(8000)) * time.Millisecond
 		go func(bot *Player) {
 			time.Sleep(delay)
-			m.doBotNightAction(room, state, bot)
+			targets := m.getTargetsForRole(room, bot)
+			if len(targets) > 0 {
+				target := targets[rand.Intn(len(targets))]
+				m.HandleNightAction(room.ID, string(bot.Role), bot.TelegramID, target.TelegramID)
+			}
 		}(p)
 	}
-}
-
-func (m *Manager) doBotNightAction(room *Room, state *GameState, bot *Player) {
-	targets := m.getTargetsForRole(room, bot)
-	if len(targets) == 0 {
-		return
-	}
-	target := targets[rand.Intn(len(targets))]
-	m.HandleNightAction(room.ID, string(bot.Role), bot.TelegramID, target.TelegramID)
 }
 
 func (m *Manager) runBotVoting(room *Room, state *GameState) {
@@ -877,13 +725,7 @@ func (m *Manager) runBotVoting(room *Room, state *GameState) {
 		}
 		go func(bot *Player) {
 			time.Sleep(time.Duration(5000+rand.Intn(10000)) * time.Millisecond)
-			alive := room.AlivePlayers()
-			var candidates []*Player
-			for _, c := range alive {
-				if c.TelegramID != bot.TelegramID {
-					candidates = append(candidates, c)
-				}
-			}
+			candidates := filterOut(room.AlivePlayers(), bot.TelegramID)
 			if len(candidates) > 0 {
 				m.HandleDayVote(room.ID, bot.TelegramID, candidates[rand.Intn(len(candidates))].TelegramID)
 			}
@@ -891,10 +733,11 @@ func (m *Manager) runBotVoting(room *Room, state *GameState) {
 	}
 }
 
-// ─── G'ALABA TEKSHIRUVI ───
+// ─── WIN CHECK ───
 
 func (m *Manager) checkWin(room *Room) (bool, string) {
-	mafiaCount, townCount, manyakAlive, suidsidAlive := 0, 0, false, false
+	mafiaCount, townCount, manyakAlive := 0, 0, false
+
 	for _, p := range room.Players {
 		if !p.IsAlive {
 			continue
@@ -904,42 +747,33 @@ func (m *Manager) checkWin(room *Room) (bool, string) {
 			mafiaCount++
 		case p.Role == roles.RoleManyak:
 			manyakAlive = true
-		case p.Role == roles.RoleSuidsid:
-			suidsidAlive = true
 		default:
 			townCount++
 		}
 	}
+
 	total := mafiaCount + townCount
 	if manyakAlive {
 		total++
 	}
 
-	if mafiaCount == 0 && !manyakAlive {
+	switch {
+	case mafiaCount == 0 && !manyakAlive:
 		return true, "town"
-	}
-	if mafiaCount >= townCount+boolToInt(manyakAlive) {
+	case mafiaCount >= townCount+boolToInt(manyakAlive):
 		return true, "mafia"
-	}
-	if manyakAlive && total <= 2 {
+	case manyakAlive && total <= 2:
 		return true, "manyak"
+	default:
+		return false, ""
 	}
-	_ = suidsidAlive
-	return false, ""
-}
-
-func boolToInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 func (m *Manager) endGame(room *Room, state *GameState, winner string) {
-	room.Status = RoomFinished
+	room.SetStatus(RoomFinished)
+
 	players := room.GetPlayerList()
-	winMsg := WinMessage(winner, players)
-	m.sendToChat(room.ChatID, winMsg)
+	m.sendToChat(room.ChatID, WinMessage(winner, players))
 
 	m.hub.BroadcastToRoom(room.ID, MsgTypeGameEnd, map[string]interface{}{
 		"winner": winner,
@@ -981,6 +815,7 @@ func (m *Manager) HandleWebConnect(roomID string, userID int64) {
 	room := m.rooms[roomID]
 	state := m.states[roomID]
 	m.mu.RUnlock()
+
 	if room == nil {
 		return
 	}
@@ -991,16 +826,7 @@ func (m *Manager) HandleWebConnect(roomID string, userID int64) {
 }
 
 func (m *Manager) sendRoomInfoToUser(room *Room, userID int64) {
-	players := []PlayerInfo{}
-	for _, p := range room.GetPlayerList() {
-		info := roles.Get(p.Role)
-		players = append(players, PlayerInfo{
-			ID:    p.TelegramID,
-			Name:  p.Username,
-			IsAlive: p.IsAlive,
-			Emoji: info.Emoji,
-		})
-	}
+	players := m.buildPlayerInfoList(room)
 	m.hub.SendToUser(userID, MsgTypeRoomInfo, map[string]interface{}{
 		"room_id":  room.ID,
 		"owner_id": room.OwnerID,
@@ -1012,16 +838,7 @@ func (m *Manager) sendRoomInfoToUser(room *Room, userID int64) {
 }
 
 func (m *Manager) sendGameStateToUser(room *Room, state *GameState, userID int64) {
-	players := []PlayerInfo{}
-	for _, p := range room.GetPlayerList() {
-		info := roles.Get(p.Role)
-		players = append(players, PlayerInfo{
-			ID:      p.TelegramID,
-			Name:    p.Username,
-			IsAlive: p.IsAlive,
-			Emoji:   info.Emoji,
-		})
-	}
+	players := m.buildPlayerInfoList(room)
 	m.hub.SendToUser(userID, MsgTypeGameState, GameStatePayload{
 		Phase:   string(state.Phase),
 		Round:   state.Round,
@@ -1030,10 +847,7 @@ func (m *Manager) sendGameStateToUser(room *Room, state *GameState, userID int64
 }
 
 func (m *Manager) broadcastRoomInfo(room *Room) {
-	players := []PlayerInfo{}
-	for _, p := range room.GetPlayerList() {
-		players = append(players, PlayerInfo{ID: p.TelegramID, Name: p.Username, IsAlive: p.IsAlive})
-	}
+	players := m.buildPlayerInfoList(room)
 	m.hub.BroadcastToRoom(room.ID, MsgTypeRoomInfo, map[string]interface{}{
 		"room_id":  room.ID,
 		"owner_id": room.OwnerID,
@@ -1045,10 +859,7 @@ func (m *Manager) broadcastRoomInfo(room *Room) {
 }
 
 func (m *Manager) broadcastGameState(room *Room, state *GameState) {
-	players := []PlayerInfo{}
-	for _, p := range room.GetPlayerList() {
-		players = append(players, PlayerInfo{ID: p.TelegramID, Name: p.Username, IsAlive: p.IsAlive})
-	}
+	players := m.buildPlayerInfoList(room)
 	m.hub.BroadcastToRoom(room.ID, MsgTypeGameState, GameStatePayload{
 		Phase:   string(state.Phase),
 		Round:   state.Round,
@@ -1056,7 +867,157 @@ func (m *Manager) broadcastGameState(room *Room, state *GameState) {
 	})
 }
 
-// ─── YORDAMCHI FUNKSIYALAR ───
+func (m *Manager) broadcastPlayerDied(room *Room, player *Player) {
+	m.hub.BroadcastToRoom(room.ID, MsgTypePlayerDied, map[string]interface{}{
+		"player_id": player.TelegramID,
+		"name":      player.Username,
+		"role":      string(player.Role),
+	})
+}
+
+// ─── HELPERS ───
+
+func (m *Manager) buildPlayerInfoList(room *Room) []PlayerInfo {
+	players := room.GetPlayerList()
+	infos := make([]PlayerInfo, 0, len(players))
+	for _, p := range players {
+		info := roles.Get(p.Role)
+		infos = append(infos, PlayerInfo{
+			ID:      p.TelegramID,
+			Name:    p.Username,
+			IsAlive: p.IsAlive,
+			Emoji:   info.Emoji,
+		})
+	}
+	return infos
+}
+
+func (m *Manager) findAliveMafiaRole(room *Room) roles.RoleName {
+	for _, p := range room.Players {
+		if p.IsAlive && (p.Role == roles.RoleDon || p.Role == roles.RoleMafia) {
+			return p.Role
+		}
+	}
+	return roles.RoleMafia
+}
+
+func (m *Manager) findPlayerByRole(room *Room, role roles.RoleName) *Player {
+	for _, p := range room.Players {
+		if p.IsAlive && p.Role == role {
+			return p
+		}
+	}
+	return nil
+}
+
+func (m *Manager) getPlayerName(room *Room, id int64) string {
+	if p, ok := room.PlayerByID(id); ok {
+		return p.Username
+	}
+	return "Noma'lum"
+}
+
+func (m *Manager) getTargetsForRole(room *Room, player *Player) []*Player {
+	var targets []*Player
+	for _, p := range room.AlivePlayers() {
+		if p.TelegramID == player.TelegramID {
+			continue
+		}
+		if (player.Role == roles.RoleMafia || player.Role == roles.RoleDon) && roles.IsMafia(p.Role) {
+			continue
+		}
+		targets = append(targets, p)
+	}
+	return targets
+}
+
+func (m *Manager) getNightVisitors(room *Room, targetID int64) []*Player {
+	var visitors []*Player
+	night := m.getRoomNight(room)
+	if night == nil {
+		return visitors
+	}
+
+	if night.MafiaTargetID == targetID {
+		for voterID := range night.MafiaVotes {
+			if p, ok := room.PlayerByID(voterID); ok {
+				visitors = append(visitors, p)
+			}
+		}
+	}
+	if night.DoctorTargetID == targetID {
+		if doc := m.findPlayerByRole(room, roles.RoleDoctor); doc != nil {
+			visitors = append(visitors, doc)
+		}
+	}
+	return visitors
+}
+
+func (m *Manager) getRoomNight(room *Room) *NightState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if state, ok := m.states[room.ID]; ok {
+		return state.Night
+	}
+	return nil
+}
+
+func (m *Manager) sendNightActions(room *Room, state *GameState) {
+	for _, p := range room.AlivePlayers() {
+		if isBot(p.TelegramID) || !roles.HasNightAction(p.Role) {
+			continue
+		}
+		targets := m.getTargetsForRole(room, p)
+		if len(targets) == 0 {
+			continue
+		}
+
+		var keyboard [][]tgbotapi.InlineKeyboardButton
+		for _, target := range targets {
+			row := tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(
+					"👤 "+target.Username,
+					fmt.Sprintf("%s_%s_%d", string(p.Role), room.ID, target.TelegramID),
+				),
+			)
+			keyboard = append(keyboard, row)
+		}
+
+		text := getNightActionText(p.Role, state.Round)
+		msg := tgbotapi.NewMessage(p.TelegramID, text)
+		msg.ParseMode = "HTML"
+		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(keyboard...)
+		m.bot.Send(msg)
+	}
+}
+
+func getNightActionText(role roles.RoleName, round int) string {
+	switch role {
+	case roles.RoleMafia, roles.RoleDon:
+		return "😈 <b>Kim sizning qurbonингиз?</b>"
+	case roles.RoleDoctor:
+		return "👨‍⚕️ <b>Kimni davolaysiz?</b>"
+	case roles.RoleKomissar:
+		if round == 1 {
+			return "🕵️ <b>1-tunda tekshiruv qila olmaysiz. Kuzating.</b>"
+		}
+		return "🕵️ <b>Kimni tekshirasiz?</b>"
+	case roles.RoleSerjant:
+		return "👮 <b>Kimni kuzatasiz?</b>"
+	case roles.RoleMashuqa:
+		return "💃 <b>Kim bilan tunni o'tkazasiz? (U harakat qila olmaydi)</b>"
+	case roles.RoleDaydi:
+		return "🧙 <b>Kim uyida tunaysiz? (Kelganlarni ko'rasiz)</b>"
+	case roles.RoleManyak:
+		return "🔪 <b>Kimni o'ldirasiz?</b>"
+	case roles.RoleTentak:
+		return "👨🏻‍🦲 <b>Kimga borasiz?</b>"
+	default:
+		return "🎯 <b>Maqsadingizni tanlang</b>"
+	}
+}
+
+// ─── MUTE / UNMUTE / SEND ───
 
 func (m *Manager) muteAll(room *Room) {
 	for _, p := range room.Players {
@@ -1108,41 +1069,40 @@ func (m *Manager) notifyAdmin(text string) {
 	m.bot.Send(msg)
 }
 
+// ─── UTILITY ───
+
 func isBot(userID int64) bool {
 	return userID < 0
 }
 
-func makeWebAppButton(text, url string) tgbotapi.InlineKeyboardButton {
-	return tgbotapi.InlineKeyboardButton{
-		Text: text,
-		URL:  &url,
+func boolToInt(b bool) int {
+	if b {
+		return 1
 	}
+	return 0
 }
 
-// GetRoom for Web API
-func (m *Manager) GetState(roomID string) *GameState {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.states[roomID]
+func makeWebAppButton(text, url string) tgbotapi.InlineKeyboardButton {
+	return tgbotapi.InlineKeyboardButton{Text: text, URL: &url}
 }
 
-func (m *Manager) CreateRoomWeb(ownerID int64, ownerName string) *Room {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	room := NewRoom(0, ownerID, ownerName)
-	m.rooms[room.ID] = room
-	m.userRooms[ownerID] = room.ID
-	return room
+func joinWithComma(parts []string) string {
+	result := ""
+	for i, p := range parts {
+		if i > 0 {
+			result += ", "
+		}
+		result += p
+	}
+	return result
 }
 
-func (m *Manager) ForceStopGame(roomID string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	room, ok := m.rooms[roomID]
-	if !ok { return }
-	m.unmuteAll(room)
-	delete(m.states, roomID)
-	for _, p := range room.Players { delete(m.userRooms, p.TelegramID) }
-	delete(m.chatRooms, room.ChatID)
-	delete(m.rooms, roomID)
+func filterOut(players []*Player, excludeID int64) []*Player {
+	var result []*Player
+	for _, p := range players {
+		if p.TelegramID != excludeID {
+			result = append(result, p)
+		}
+	}
+	return result
 }

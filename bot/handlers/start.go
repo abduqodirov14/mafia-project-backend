@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"mafia-bot/config"
 	"mafia-bot/db/repositories"
 	"mafia-bot/game"
 
@@ -11,15 +12,21 @@ import (
 )
 
 type StartHandler struct {
-	bot         *tgbotapi.BotAPI
-	userRepo    *repositories.UserRepository
-	manager     *game.Manager
-	webAppURL   string
+	bot       *tgbotapi.BotAPI
+	cfg       *config.Config
+	userRepo  *repositories.UserRepository
+	manager   *game.Manager
 	botUsername string
 }
 
-func NewStartHandler(bot *tgbotapi.BotAPI, userRepo *repositories.UserRepository, manager *game.Manager, webAppURL, botUsername string) *StartHandler {
-	return &StartHandler{bot: bot, userRepo: userRepo, manager: manager, webAppURL: webAppURL, botUsername: botUsername}
+func NewStartHandler(bot *tgbotapi.BotAPI, cfg *config.Config, userRepo *repositories.UserRepository, manager *game.Manager, botUsername string) *StartHandler {
+	return &StartHandler{
+		bot:        bot,
+		cfg:        cfg,
+		userRepo:   userRepo,
+		manager:    manager,
+		botUsername: botUsername,
+	}
 }
 
 func (h *StartHandler) Handle(update tgbotapi.Update) {
@@ -29,9 +36,7 @@ func (h *StartHandler) Handle(update tgbotapi.Update) {
 	msg := update.Message
 	from := msg.From
 
-	// DB ga saqlash
-	user, _ := h.userRepo.GetOrCreate(from.ID, from.UserName, from.FirstName)
-	_ = user
+	h.userRepo.GetOrCreate(from.ID, from.UserName, from.FirstName)
 
 	switch msg.Command() {
 	case "start":
@@ -57,7 +62,6 @@ func (h *StartHandler) handleStart(msg *tgbotapi.Message) {
 	from := msg.From
 	args := msg.CommandArguments()
 
-	// Referral / xonaga qo'shilish
 	if strings.HasPrefix(args, "ref_") {
 		roomID := strings.TrimPrefix(args, "ref_")
 		h.joinRoomByRef(msg, roomID)
@@ -69,41 +73,61 @@ func (h *StartHandler) handleStart(msg *tgbotapi.Message) {
 		name = "@" + from.UserName
 	}
 
+	user, _ := h.userRepo.GetOrCreate(from.ID, from.UserName, from.FirstName)
+	winRate := 0
+	if user.TotalGames > 0 {
+		winRate = (user.Wins * 100) / user.TotalGames
+	}
+
 	text := fmt.Sprintf(
-		"🎭 <b>MAFIA GAME</b> ga xush kelibsiz, %s!\n\n"+
-			"🎮 Bu klassik Mafia o'yinining Telegram versiyasi!\n\n"+
-			"<b>Qanday o'ynash:</b>\n"+
-			"1️⃣ Guruhingizga botni qo'shing\n"+
-			"2️⃣ /start yuboring — o'yin boshlanadi\n"+
-			"3️⃣ Do'stlaringiz qo'shiladi\n"+
-			"4️⃣ Rollar tarqatiladi — o'ynang!\n\n"+
-			"<b>Yoki WebApp orqali o'ynang:</b>", name)
+		"╔══════════════════╗\n"+
+			"║   🎭  M A F I A  ║\n"+
+			"╚══════════════════╝\n\n"+
+			"Assalomu alaykum, <b>%s</b>!\n\n"+
+			"🏙 Shaharda qotillik sodir bo'ldi.\n"+
+			"Sizning vazifangiz — mafiyani topish!\n\n"+
+			"┌──────────────────┐\n"+
+			"│ 🎮 O'ynash usullari\n"+
+			"├──────────────────┤\n"+
+			"│ 1. Guruhga botni qo'shing\n"+
+			"│ 2. /start — o'yin yarating\n"+
+			"│ 3. /+ — o'yinga qo'shiling\n"+
+			"│ 4. Rollar tarqatiladi!\n"+
+			"└──────────────────┘\n\n"+
+			"💰 Balans: <b>%d tanga</b>  ⭐ XP: <b>%d</b>\n"+
+			"🏅 Liga: %s  📈 G'alaba: <b>%d%%</b>",
+		name, user.Coins, user.XP, string(user.League), winRate)
 
 	outMsg := tgbotapi.NewMessage(msg.Chat.ID, text)
 	outMsg.ParseMode = "HTML"
+	outMsg.DisableWebPagePreview = true
 
 	var rows [][]tgbotapi.InlineKeyboardButton
-	if h.webAppURL != "" {
-		webBtn := tgbotapi.InlineKeyboardButton{
-			Text: "🎮 O'yinni boshlash (WebApp)",
-			URL:  &h.webAppURL,
-		}
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(webBtn))
+
+	if h.cfg.WebAppURL != "" {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.InlineKeyboardButton{
+				Text:  "🎮  O'YINNI BOSHLASH",
+				URL:   &h.cfg.WebAppURL,
+			},
+		))
 	}
+
 	rows = append(rows,
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📖 Qoidalar", "rules"),
-			tgbotapi.NewInlineKeyboardButtonData("👥 Rollar", "roles_info"),
-		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("👤 Profilim", "my_profile"),
 			tgbotapi.NewInlineKeyboardButtonData("🏆 Reyting", "top_players"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⭐ Do'kon", "shop_main"),
+			tgbotapi.NewInlineKeyboardButtonData("📖 Qoidalar", "rules"),
+			tgbotapi.NewInlineKeyboardButtonData("🎭 Rollar", "roles_info"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("💰 Do'kon", "shop_main"),
 			tgbotapi.NewInlineKeyboardButtonData("🆘 Yordam", "support_main"),
 		),
 	)
+
 	outMsg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
 	h.bot.Send(outMsg)
 }
@@ -112,9 +136,10 @@ func (h *StartHandler) joinRoomByRef(msg *tgbotapi.Message, roomID string) {
 	from := msg.From
 	room := h.manager.GetRoom(roomID)
 	if room == nil {
-		h.bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ Xona topilmadi yoki o'yin tugagan."))
+		h.send(msg.Chat.ID, "❌ Xona topilmadi yoki o'yin tugagan.")
 		return
 	}
+
 	player := &game.Player{
 		TelegramID: from.ID,
 		Username:   from.UserName,
@@ -125,19 +150,16 @@ func (h *StartHandler) joinRoomByRef(msg *tgbotapi.Message, roomID string) {
 		h.send(msg.Chat.ID, "⚠️ "+err.Error())
 		return
 	}
+
 	text := fmt.Sprintf("✅ Xonaga qo'shildingiz!\nXona ID: <code>%s</code>\nO'yinchilar: <b>%d/%d</b>",
 		roomID, room.PlayerCount(), room.MaxPlayers)
 	outMsg := tgbotapi.NewMessage(msg.Chat.ID, text)
 	outMsg.ParseMode = "HTML"
-	if h.webAppURL != "" {
-		joinURL := h.webAppURL + "?room=" + roomID
-		webBtn := tgbotapi.InlineKeyboardButton{
-			Text: "🎮 O'yinga kirish (WebApp)",
-			URL:  &joinURL,
-		}
-		outMsg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
-			tgbotapi.NewInlineKeyboardRow(webBtn),
-		)
+
+	if h.cfg.WebAppURL != "" {
+		joinURL := h.cfg.WebAppURL + "?room=" + roomID
+		webBtn := tgbotapi.InlineKeyboardButton{Text: "🎮 O'yinga kirish (WebApp)", URL: &joinURL}
+		outMsg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(webBtn))
 	}
 	h.bot.Send(outMsg)
 }
@@ -171,15 +193,16 @@ func (h *StartHandler) handleHelp(msg *tgbotapi.Message) {
 }
 
 func (h *StartHandler) handleProfile(msg *tgbotapi.Message) {
-	from := msg.From
-	user, err := h.userRepo.GetOrCreate(from.ID, from.UserName, from.FirstName)
+	user, err := h.userRepo.GetOrCreate(msg.From.ID, msg.From.UserName, msg.From.FirstName)
 	if err != nil {
 		return
 	}
+
 	winRate := 0.0
 	if user.TotalGames > 0 {
 		winRate = float64(user.Wins) / float64(user.TotalGames) * 100
 	}
+
 	text := fmt.Sprintf(
 		"👤 <b>PROFIL</b>\n\n"+
 			"📛 Ism: @%s\n"+
@@ -209,6 +232,7 @@ func (h *StartHandler) handleRating(msg *tgbotapi.Message) {
 	if err != nil {
 		return
 	}
+
 	text := "🏆 <b>TOP-10 O'YINCHILAR</b>\n\n"
 	medals := []string{"🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"}
 	for i, u := range users {
@@ -218,49 +242,71 @@ func (h *StartHandler) handleRating(msg *tgbotapi.Message) {
 }
 
 func (h *StartHandler) handleRules(msg *tgbotapi.Message) {
-	text := `🎭 <b>O'YIN QOIDALARI</b>
-
-🌙 <b>Tun fazasi:</b>
-• Mafia qurbon tanlaydi
-• Shifokor kimnidir davolaydi
-• Komissar kimnidir tekshiradi
-• Boshqa rollar ham harakat qiladi
-
-☀️ <b>Kun fazasi:</b>
-• 90 soniya muhokama
-• Mafiyani ovoz bilan chiqaring
-
-🏆 <b>G'alaba sharti:</b>
-• <b>Shahar:</b> Barcha mafia o'lsa
-• <b>Mafia:</b> Mafia soni ≥ shahar soni
-
-💡 <b>Maslahat:</b>
-Rollar shaxsiy xabarda yuboriladi.
-WebApp orqali osonroq o'ynang!`
+	text := "📜 <b>O'YIN QOIDALARI</b>\n\n" +
+		"╔═══════════════════════╗\n" +
+		"║     🌙  TUN FAZASI    ║\n" +
+		"╚═══════════════════════╝\n\n" +
+		"🌙 Mafiyachilar qurbon tanlaydi\n" +
+		"👨‍⚕️ Shifokor birini qutqaradi\n" +
+		"🕵️ Komissar birini tekshiradi\n" +
+		"💃 Mashuqa birini bloklaydi\n" +
+		"🧙 Daydi kelganlarni kuzatadi\n\n" +
+		"╔═══════════════════════╗\n" +
+		"║     ☀️  KUN FAZASI    ║\n" +
+		"╚═══════════════════════╝\n\n" +
+		"☀️ 90 soniya muhokama vaqti\n" +
+		"🗳 Mafiyani ovoz bilan chiqaring\n\n" +
+		"╔═══════════════════════╗\n" +
+		"║    🏆  G'ALABA SHARTI  ║\n" +
+		"╚═══════════════════════╝\n\n" +
+		"🏙 <b>Shahar:</b> Barcha mafia o'lsa\n" +
+		"😈 <b>Mafia:</b> Mafia ≥ Shahar\n\n" +
+		"💡 <b>Maslahat:</b> WebApp orqali o'ynang!\n" +
+		"Ovozli suhbat, chiroyli interfeys!"
 
 	h.send(msg.Chat.ID, text)
 }
 
 func (h *StartHandler) handleRoles(msg *tgbotapi.Message) {
-	text := `🎭 <b>ROLLAR HAQIDA</b>
-
-🔵 <b>Shahar tomonlari:</b>
-👨🏼 Tinch aholi — Mafia topadi
-👨‍⚕️ Shifokor — Birini davolaydi
-🕵🏼 Komissar — Birini tekshiradi
-👮‍♂️ Serjant — Komissar o'lsa o'rnini oladi
-🧙🏻‍♂️ Daydi — Kechasi kimlar kelganini ko'radi
-💃 Mashuqa — Birini bloklaydi
-
-🔴 <b>Mafia tomonlari:</b>
-🤵🏻 Don — Mafia boshlig'i
-🤵🏼 Mafiya — Don ko'rsatmasini bajaradi
-👨‍💼 Advokat — Komissardan yashiradi
-
-⚫ <b>Yakka rollar:</b>
-🔪 Manyak — Hammani o'ldiradi
-🧌 Suidsid — Ovoz bilan chiqarilsa yutadi
-💣 Kamikaze — O'lsa bitta odamni olib ketadi`
+	text := "🎭 <b>ROLLAR KATALOGI</b>\n\n" +
+		"┌─────────────────────────┐\n" +
+		"│ 🔵 <b>SHAHAR TOMONI</b>\n" +
+		"├─────────────────────────┤\n" +
+		"│ 👨🏼 <b>Tinch aholi</b>\n" +
+		"│    Oddiy fuqaro, ovoz beradi\n" +
+		"│ 👨‍⚕️ <b>Shifokor</b>\n" +
+		"│    Tunda bitta odamni qutqaradi\n" +
+		"│ 🕵🏼 <b>Komissar</b>\n" +
+		"│    Tunda birini tekshiradi\n" +
+		"│ 👮 <b>Serjant</b>\n" +
+		"│    Komissar o'lsa o'rnini oladi\n" +
+		"│ 🧙 <b>Daydi</b>\n" +
+		"│    Kelganlarni ko'radi\n" +
+		"│ 💃 <b>Mashuqa</b>\n" +
+		"│    Birini bloklaydi\n" +
+		"│ 👨🏻‍🦲 <b>Tentak</b>\n" +
+		"│    Tinch aholini himoya qiladi\n" +
+		"└─────────────────────────┘\n\n" +
+		"┌─────────────────────────┐\n" +
+		"│ 🔴 <b>MAFIA TOMONI</b>\n" +
+		"├─────────────────────────┤\n" +
+		"│ 🤵🏻 <b>Don</b>\n" +
+		"│    Mafia boshlig'i\n" +
+		"│ 🤵🏼 <b>Mafiya</b>\n" +
+		"│    Don buyrug'ini bajaradi\n" +
+		"│ 👨‍💼 <b>Advokat</b>\n" +
+		"│    Komissardan yashiradi\n" +
+		"└─────────────────────────┘\n\n" +
+		"┌─────────────────────────┐\n" +
+		"│ ⚫ <b>YAKKA ROLLAR</b>\n" +
+		"├─────────────────────────┤\n" +
+		"│ 🔪 <b>Manyak</b>\n" +
+		"│    Hammani o'ldiradi\n" +
+		"│ 🧌 <b>Suidsid</b>\n" +
+		"│    Chiqarilsa — yutadi\n" +
+		"│ 💣 <b>Kamikaze</b>\n" +
+		"│    O'lsa bittasini olib ketadi\n" +
+		"└─────────────────────────┘"
 
 	h.send(msg.Chat.ID, text)
 }
@@ -294,17 +340,20 @@ func (h *StartHandler) handleSupport(msg *tgbotapi.Message) {
 }
 
 func (h *StartHandler) handleTestGame(msg *tgbotapi.Message) {
-	from := msg.From
 	chatID := msg.Chat.ID
+	room := h.manager.CreateRoom(chatID, msg.From.ID, msg.From.UserName)
 
-	room := h.manager.CreateRoom(chatID, from.ID, from.UserName)
-	bots := []struct{ id int64; name string }{
+	bots := []struct {
+		id   int64
+		name string
+	}{
 		{-1001, "🤖 Sardor"}, {-1002, "🤖 Dilnoza"},
-		{-1003, "🤖 Komil"},  {-1004, "🤖 Shaxboz"},
+		{-1003, "🤖 Komil"}, {-1004, "🤖 Shaxboz"},
 	}
 	for _, b := range bots {
 		h.manager.JoinRoom(room.ID, &game.Player{TelegramID: b.id, Username: b.name, IsAlive: true})
 	}
+
 	h.send(chatID, fmt.Sprintf("🧪 <b>TEST O'YIN</b>\nXona: <code>%s</code>\n5 o'yinchi (siz + 4 bot)\n\nRollar yuborilmoqda...", room.ID))
 	if err := h.manager.StartGame(room.ID); err != nil {
 		h.send(chatID, "❌ "+err.Error())
@@ -313,6 +362,7 @@ func (h *StartHandler) handleTestGame(msg *tgbotapi.Message) {
 
 func (h *StartHandler) HandleCallback(query *tgbotapi.CallbackQuery) bool {
 	h.bot.Request(tgbotapi.NewCallback(query.ID, ""))
+
 	switch query.Data {
 	case "rules":
 		h.send(query.Message.Chat.ID, "Qoidalarni /rules buyrug'i bilan ko'ring")

@@ -1,10 +1,10 @@
 package handlers
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
+	"mafia-bot/config"
 	"mafia-bot/db/repositories"
 	"mafia-bot/game"
 
@@ -12,14 +12,14 @@ import (
 )
 
 type GroupHandler struct {
-	bot       *tgbotapi.BotAPI
-	manager   *game.Manager
-	userRepo  *repositories.UserRepository
-	webAppURL string
+	bot      *tgbotapi.BotAPI
+	cfg      *config.Config
+	manager  *game.Manager
+	userRepo *repositories.UserRepository
 }
 
-func NewGroupHandler(bot *tgbotapi.BotAPI, manager *game.Manager, userRepo *repositories.UserRepository, webAppURL string) *GroupHandler {
-	return &GroupHandler{bot: bot, manager: manager, userRepo: userRepo, webAppURL: webAppURL}
+func NewGroupHandler(bot *tgbotapi.BotAPI, cfg *config.Config, manager *game.Manager, userRepo *repositories.UserRepository) *GroupHandler {
+	return &GroupHandler{bot: bot, cfg: cfg, manager: manager, userRepo: userRepo}
 }
 
 func (h *GroupHandler) Handle(update tgbotapi.Update) {
@@ -42,11 +42,9 @@ func (h *GroupHandler) Handle(update tgbotapi.Update) {
 		h.handleStat(msg, chatID)
 	}
 
-	// /+ qo'shilish
 	if msg.Text == "/+" || msg.Text == "/join" || strings.HasPrefix(msg.Text, "/+") {
 		h.handleJoin(msg, chatID)
 	}
-	// /- chiqish
 	if msg.Text == "/-" || msg.Text == "/leave" {
 		h.handleLeave(msg, chatID)
 	}
@@ -56,75 +54,48 @@ func (h *GroupHandler) HandleCallback(query *tgbotapi.CallbackQuery) bool {
 	data := query.Data
 	switch {
 	case strings.HasPrefix(data, "join_"):
-		roomID := strings.TrimPrefix(data, "join_")
-		h.joinByCallback(query, roomID)
+		h.joinByCallback(query, strings.TrimPrefix(data, "join_"))
 		return true
 	case strings.HasPrefix(data, "leave_"):
-		roomID := strings.TrimPrefix(data, "leave_")
-		h.leaveByCallback(query, roomID)
+		h.leaveByCallback(query, strings.TrimPrefix(data, "leave_"))
 		return true
 	case strings.HasPrefix(data, "startgame_"):
-		roomID := strings.TrimPrefix(data, "startgame_")
-		h.startByCallback(query, roomID)
+		h.startByCallback(query, strings.TrimPrefix(data, "startgame_"))
 		return true
 	case strings.HasPrefix(data, "vote_"):
-		parts := strings.Split(strings.TrimPrefix(data, "vote_"), "_")
-		if len(parts) == 2 {
-			var roomID, targetIDStr = parts[0], parts[1]
-			var targetID int64
-			fmt.Sscanf(targetIDStr, "%d", &targetID)
-			h.manager.HandleDayVote(roomID, query.From.ID, targetID)
-			h.bot.Request(tgbotapi.NewCallback(query.ID, "✅ Ovoz berildi"))
-		}
+		h.handleVoteCallback(query, strings.TrimPrefix(data, "vote_"))
 		return true
 	}
-	// Night actions: "RoleName_roomID_targetID"
 	return h.handleNightActionCallback(query, data)
 }
 
 func (h *GroupHandler) handleStart(msg *tgbotapi.Message, chatID int64) {
-	from := msg.From
-
-	// Guruhda mavjud o'yin bormi?
 	existingRoom := h.manager.GetRoomByChat(chatID)
 	if existingRoom != nil {
-		h.bot.Send(tgbotapi.NewMessage(chatID,
-			fmt.Sprintf("⚠️ Guruhda allaqachon o'yin bor!\nXona ID: <code>%s</code>", existingRoom.ID)))
+		h.send(chatID, fmt.Sprintf("⚠️ Guruhda allaqachon o'yin bor!\nXona ID: <code>%s</code>", existingRoom.ID))
 		return
 	}
 
-	// Yangi xona yaratish
-	room := h.manager.CreateRoom(chatID, from.ID, from.UserName)
-
-	text := game.JoinMessage(1, room.MaxPlayers)
-
-	outMsg := tgbotapi.NewMessage(chatID, text)
+	room := h.manager.CreateRoom(chatID, msg.From.ID, msg.From.UserName)
+	outMsg := tgbotapi.NewMessage(chatID, game.JoinMessage(1, room.MaxPlayers))
 	outMsg.ParseMode = "HTML"
 	outMsg.ReplyMarkup = h.buildJoinKeyboard(room.ID)
+
 	sentMsg, err := h.bot.Send(outMsg)
 	if err == nil {
-		// Pin the message
-		h.bot.Request(tgbotapi.PinChatMessageConfig{
-			ChatID:    chatID,
-			MessageID: sentMsg.MessageID,
-		})
+		h.bot.Request(tgbotapi.PinChatMessageConfig{ChatID: chatID, MessageID: sentMsg.MessageID})
 	}
 }
 
 func (h *GroupHandler) buildJoinKeyboard(roomID string) tgbotapi.InlineKeyboardMarkup {
 	var rows [][]tgbotapi.InlineKeyboardButton
 
-	// WebApp tugmasi
-	if h.webAppURL != "" {
-		joinURL := h.webAppURL + "?room=" + roomID
-		webBtn := tgbotapi.InlineKeyboardButton{
-			Text: "🎮 O'yinga kirish (WebApp)",
-			URL:  &joinURL,
-		}
+	if h.cfg.WebAppURL != "" {
+		joinURL := h.cfg.WebAppURL + "?room=" + roomID
+		webBtn := tgbotapi.InlineKeyboardButton{Text: "🎮 O'yinga kirish (WebApp)", URL: &joinURL}
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(webBtn))
 	}
 
-	// Qo'shilish / Chiqish / Boshlash
 	rows = append(rows,
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("✅ Qo'shilish", "join_"+roomID),
@@ -138,75 +109,64 @@ func (h *GroupHandler) buildJoinKeyboard(roomID string) tgbotapi.InlineKeyboardM
 }
 
 func (h *GroupHandler) handleJoin(msg *tgbotapi.Message, chatID int64) {
-	from := msg.From
 	room := h.manager.GetRoomByChat(chatID)
 	if room == nil {
-		h.bot.Send(tgbotapi.NewMessage(chatID, "❌ Aktiv o'yin yo'q. /start bilan boshlang."))
+		h.send(chatID, "❌ Aktiv o'yin yo'q. /start bilan boshlang.")
 		return
 	}
+
 	player := &game.Player{
-		TelegramID: from.ID,
-		Username:   from.UserName,
-		FirstName:  from.FirstName,
+		TelegramID: msg.From.ID,
+		Username:   msg.From.UserName,
+		FirstName:  msg.From.FirstName,
 		IsAlive:    true,
 	}
 	if err := h.manager.JoinRoom(room.ID, player); err != nil {
-		h.bot.Send(tgbotapi.NewMessage(chatID, "⚠️ "+err.Error()))
+		h.send(chatID, "⚠️ "+err.Error())
 		return
 	}
-	joinMsg := tgbotapi.NewMessage(chatID, game.PlayerJoinedMsg(from.UserName, room.PlayerCount(), room.MaxPlayers))
-	joinMsg.ParseMode = "HTML"
-	h.bot.Send(joinMsg)
+	h.send(chatID, game.PlayerJoinedMsg(msg.From.UserName, room.PlayerCount(), room.MaxPlayers))
 }
 
 func (h *GroupHandler) handleLeave(msg *tgbotapi.Message, chatID int64) {
-	from := msg.From
 	room := h.manager.GetRoomByChat(chatID)
 	if room == nil {
 		return
 	}
-	h.manager.LeaveRoom(from.ID)
-	leaveMsg := tgbotapi.NewMessage(chatID, game.PlayerLeftMsg(from.UserName, room.PlayerCount(), room.MaxPlayers))
-	leaveMsg.ParseMode = "HTML"
-	h.bot.Send(leaveMsg)
+	h.manager.LeaveRoom(msg.From.ID)
+	h.send(chatID, game.PlayerLeftMsg(msg.From.UserName, room.PlayerCount(), room.MaxPlayers))
 }
 
 func (h *GroupHandler) handleStop(msg *tgbotapi.Message, chatID int64) {
-	from := msg.From
 	room := h.manager.GetRoomByChat(chatID)
 	if room == nil {
-		h.bot.Send(tgbotapi.NewMessage(chatID, "❌ Aktiv o'yin yo'q."))
+		h.send(chatID, "❌ Aktiv o'yin yo'q.")
 		return
 	}
-	if room.OwnerID != from.ID {
-		// Admin tekshiruvi
-		member, err := h.bot.GetChatMember(tgbotapi.GetChatMemberConfig{
-			ChatConfigWithUser: tgbotapi.ChatConfigWithUser{ChatID: chatID, UserID: from.ID},
-		})
-		if err != nil || (member.Status != "administrator" && member.Status != "creator") {
-			h.bot.Send(tgbotapi.NewMessage(chatID, "❌ Faqat guruh admini yoki o'yin egasi to'xtatishi mumkin."))
-			return
-		}
+
+	if room.OwnerID != msg.From.ID && !h.isGroupAdmin(chatID, msg.From.ID) {
+		h.send(chatID, "❌ Faqat guruh admini yoki o'yin egasi to'xtatishi mumkin.")
+		return
 	}
+
 	h.manager.ForceStopGame(room.ID)
-	h.bot.Send(tgbotapi.NewMessage(chatID, "🛑 O'yin to'xtatildi."))
+	h.send(chatID, "🛑 O'yin to'xtatildi.")
 }
 
 func (h *GroupHandler) handleStat(msg *tgbotapi.Message, chatID int64) {
 	room := h.manager.GetRoomByChat(chatID)
 	if room == nil {
-		h.bot.Send(tgbotapi.NewMessage(chatID, "ℹ️ Hozir aktiv o'yin yo'q."))
+		h.send(chatID, "ℹ️ Hozir aktiv o'yin yo'q.")
 		return
 	}
+
 	players := room.GetPlayerList()
 	text := fmt.Sprintf("📊 <b>O'yin holati</b>\nXona: <code>%s</code>\nHolat: %s\nO'yinchilar: <b>%d</b>\n\n",
 		room.ID, string(room.Status), len(players))
 	for i, p := range players {
 		text += fmt.Sprintf("%d. @%s\n", i+1, p.Username)
 	}
-	statMsg := tgbotapi.NewMessage(chatID, text)
-	statMsg.ParseMode = "HTML"
-	h.bot.Send(statMsg)
+	h.send(chatID, text)
 }
 
 // ─── CALLBACK HANDLERS ───
@@ -219,24 +179,21 @@ func (h *GroupHandler) joinByCallback(query *tgbotapi.CallbackQuery, roomID stri
 		FirstName:  from.FirstName,
 		IsAlive:    true,
 	}
+
 	if err := h.manager.JoinRoom(roomID, player); err != nil {
 		h.bot.Request(tgbotapi.NewCallback(query.ID, "⚠️ "+err.Error()))
 		return
 	}
+
 	room := h.manager.GetRoom(roomID)
 	if room == nil {
 		return
 	}
+
 	h.bot.Request(tgbotapi.NewCallback(query.ID, "✅ O'yinga qo'shildingiz!"))
 
-	// Guruhga xabar
 	if query.Message != nil {
-		joinMsg := tgbotapi.NewMessage(query.Message.Chat.ID,
-			game.PlayerJoinedMsg(from.UserName, room.PlayerCount(), room.MaxPlayers))
-		joinMsg.ParseMode = "HTML"
-		h.bot.Send(joinMsg)
-
-		// Tugmani yangilash
+		h.send(query.Message.Chat.ID, game.PlayerJoinedMsg(from.UserName, room.PlayerCount(), room.MaxPlayers))
 		edit := tgbotapi.NewEditMessageReplyMarkup(
 			query.Message.Chat.ID,
 			query.Message.MessageID,
@@ -247,40 +204,24 @@ func (h *GroupHandler) joinByCallback(query *tgbotapi.CallbackQuery, roomID stri
 }
 
 func (h *GroupHandler) leaveByCallback(query *tgbotapi.CallbackQuery, roomID string) {
-	from := query.From
-	h.manager.LeaveRoom(from.ID)
+	h.manager.LeaveRoom(query.From.ID)
 	h.bot.Request(tgbotapi.NewCallback(query.ID, "👋 O'yindan chiqdingiz"))
 
-	room := h.manager.GetRoom(roomID)
-	if room != nil && query.Message != nil {
-		leaveMsg := tgbotapi.NewMessage(query.Message.Chat.ID,
-			game.PlayerLeftMsg(from.UserName, room.PlayerCount(), room.MaxPlayers))
-		leaveMsg.ParseMode = "HTML"
-		h.bot.Send(leaveMsg)
+	if room := h.manager.GetRoom(roomID); room != nil && query.Message != nil {
+		h.send(query.Message.Chat.ID, game.PlayerLeftMsg(query.From.UserName, room.PlayerCount(), room.MaxPlayers))
 	}
 }
 
 func (h *GroupHandler) startByCallback(query *tgbotapi.CallbackQuery, roomID string) {
-	from := query.From
 	room := h.manager.GetRoom(roomID)
 	if room == nil {
 		h.bot.Request(tgbotapi.NewCallback(query.ID, "❌ Xona topilmadi"))
 		return
 	}
 
-	// Faqat egasi yoki admin boshlashi mumkin
-	if room.OwnerID != from.ID {
-		if query.Message != nil {
-			member, err := h.bot.GetChatMember(tgbotapi.GetChatMemberConfig{
-				ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
-					ChatID: query.Message.Chat.ID, UserID: from.ID,
-				},
-			})
-			if err != nil || (member.Status != "administrator" && member.Status != "creator") {
-				h.bot.Request(tgbotapi.NewCallback(query.ID, "❌ Faqat xona egasi boshlashi mumkin"))
-				return
-			}
-		}
+	if room.OwnerID != query.From.ID && !h.isGroupAdmin(query.Message.Chat.ID, query.From.ID) {
+		h.bot.Request(tgbotapi.NewCallback(query.ID, "❌ Faqat xona egasi boshlashi mumkin"))
+		return
 	}
 
 	if err := h.manager.StartGame(roomID); err != nil {
@@ -290,19 +231,30 @@ func (h *GroupHandler) startByCallback(query *tgbotapi.CallbackQuery, roomID str
 	h.bot.Request(tgbotapi.NewCallback(query.ID, "🎮 O'yin boshlandi!"))
 }
 
+func (h *GroupHandler) handleVoteCallback(query *tgbotapi.CallbackQuery, data string) {
+	parts := strings.Split(data, "_")
+	if len(parts) != 2 {
+		return
+	}
+
+	roomID := parts[0]
+	var targetID int64
+	fmt.Sscanf(parts[1], "%d", &targetID)
+
+	h.manager.HandleDayVote(roomID, query.From.ID, targetID)
+	h.bot.Request(tgbotapi.NewCallback(query.ID, "✅ Ovoz berildi"))
+}
+
 func (h *GroupHandler) handleNightActionCallback(query *tgbotapi.CallbackQuery, data string) bool {
-	// Format: "RoleName_roomID_targetID"
 	parts := strings.SplitN(data, "_", 3)
 	if len(parts) != 3 {
 		return false
 	}
 
-	roleName := parts[0]
-	roomID := parts[1]
+	roleName, roomID := parts[0], parts[1]
 	var targetID int64
 	fmt.Sscanf(parts[2], "%d", &targetID)
 
-	// Rol tekshiruvi
 	validRoles := map[string]bool{
 		"Don": true, "Mafiya": true, "Shifokor": true,
 		"Komissar": true, "Serjant": true, "Mashuqa": true,
@@ -312,38 +264,36 @@ func (h *GroupHandler) handleNightActionCallback(query *tgbotapi.CallbackQuery, 
 		return false
 	}
 
-	from := query.From
 	room := h.manager.GetRoom(roomID)
 	if room == nil {
 		h.bot.Request(tgbotapi.NewCallback(query.ID, "❌ Xona topilmadi"))
 		return true
 	}
 
-	target, ok := room.Players[targetID]
-	if !ok {
+	if _, ok := room.PlayerByID(targetID); !ok {
 		h.bot.Request(tgbotapi.NewCallback(query.ID, "❌ O'yinchi topilmadi"))
 		return true
 	}
 
-	h.manager.HandleNightAction(roomID, roleName, from.ID, targetID)
+	h.manager.HandleNightAction(roomID, roleName, query.From.ID, targetID)
+
+	target, _ := room.PlayerByID(targetID)
 	h.bot.Request(tgbotapi.NewCallback(query.ID, fmt.Sprintf("✅ %s tanlandi", target.Username)))
 	return true
 }
 
-// Inline keyboard uchun JSON helper
-func makeInlineKbd(rows ...[]map[string]interface{}) interface{} {
-	type kbdBtn struct {
-		Text         string `json:"text"`
-		CallbackData string `json:"callback_data,omitempty"`
+func (h *GroupHandler) isGroupAdmin(chatID, userID int64) bool {
+	member, err := h.bot.GetChatMember(tgbotapi.GetChatMemberConfig{
+		ChatConfigWithUser: tgbotapi.ChatConfigWithUser{ChatID: chatID, UserID: userID},
+	})
+	if err != nil {
+		return false
 	}
-	type kbd struct {
-		InlineKeyboard [][]kbdBtn `json:"inline_keyboard"`
-	}
-	_ = rows
-	return nil
+	return member.Status == "administrator" || member.Status == "creator"
 }
 
-func jsonEncode(v interface{}) string {
-	b, _ := json.Marshal(v)
-	return string(b)
+func (h *GroupHandler) send(chatID int64, text string) {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "HTML"
+	h.bot.Send(msg)
 }
